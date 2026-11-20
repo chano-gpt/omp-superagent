@@ -1569,11 +1569,13 @@ describe("Discord approval controls", () => {
       admissions++;
       if (!accepting) throw failure;
     });
-    const id = await messenger.showApproval(approval({ request: { method: "ask", questions: [
+    const ownerContext = "The choice changes the retention commitment.";
+    const id = await messenger.showApproval(approval({ ownerContext, request: { method: "ask", questions: [
       { id: "q1", question: "Single?", options: [{ label: "A" }, { label: "B" }] },
       { id: "q2", question: "Multiple?", multi: true, options: [{ label: "C" }, { label: "D" }] },
     ] } }));
     const message = channel.remote.get(id)!;
+    expect(channel.sent[0]?.content).toContain(ownerContext);
     const token = parseDiscordControl(message.components[0]!.components[0]!.customId)!.token;
     const act = async (action: string, kind: "button" | "select" | "modal" = "button", patch: Record<string, unknown> = {}) => {
       const click = interaction(message, `omp:${token}:${action}`, kind, patch);
@@ -1585,9 +1587,11 @@ describe("Discord approval controls", () => {
     expect(open.modals).toHaveLength(1);
     expect(open.ack).toBe(0);
     expect((await act("custom-0", "modal")).ack).toBe(1); // Free text replaces a single selection.
+    expect(JSON.stringify(message.edits.at(-1))).not.toContain("typed answer");
     expect((await act("next-0")).ack).toBe(1);
     expect((await act("choose-1", "select", { values: ["0", "1"] })).ack).toBe(1);
     expect((await act("custom-1", "modal")).ack).toBe(1);
+    expect(JSON.stringify(message.edits.at(-1))).not.toContain("typed answer");
     expect(admissions).toBe(0); // Partial progress only ACKs the current draft.
     const edits = message.edits.length;
     expect((await act("next-1")).ack).toBe(0);

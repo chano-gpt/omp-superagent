@@ -406,6 +406,15 @@ export class TelegramMessenger implements Messenger {
     if (text.length > TEXT_LIMIT || rows.length > 100 || rows.flat().some(button => button.text.length > 64)) {
       throw new DeliveryError("Dialog exceeds Telegram card limits; use the local OMP interface", "rejected");
     }
+    const context = pending.approval.ownerContext;
+    if (dialog.method === "ask" && context) {
+      const prefix = "Why your decision is needed: ";
+      const available = TEXT_LIMIT - text.length - prefix.length - 2;
+      if (available > 0) {
+        const reason = context.length <= available ? context : `${context.slice(0, available - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
+        text = `${prefix}${reason}\n\n${text}`;
+      }
+    }
     return { text, reply_markup: { inline_keyboard: rows } };
   }
 
@@ -524,21 +533,25 @@ export class TelegramMessenger implements Messenger {
       if (message === true || !this.matchesCard(pending, message)) throw new DeliveryError("Telegram returned an unexpected edited card", "uncertain");
     } catch (error) { if (!notModified(error)) throw telegramDeliveryError(error); }
   }
-  private async finish(pending: Pending, response: DialogResponse, eventId: string): Promise<void> {
+  private async finish(pending: Pending, response: DialogResponse, eventId: string, acknowledge?: () => Promise<void>): Promise<void> {
     validateDecisionResponse(pending.approval, response);
     pending.active = false; pending.lastUpdate = eventId;
     pending.answerRequest = hash(JSON.stringify(pending.approval.request)); this.save(pending);
-    try { await this.handlers!.answer(pending.approval.id, response, pending.approval.route); }
-    finally { await this.dismissApproval({ ...pending.approval, remoteId: pending.messageId }); }
+    try {
+      await this.handlers!.answer(pending.approval.id, response, pending.approval.route);
+      // Admission is durable even if clearing the original controls fails.
+      await acknowledge?.();
+    } finally { await this.dismissApproval({ ...pending.approval, remoteId: pending.messageId }); }
   }
 
   private async callback(query: CallbackQuery): Promise<void> {
     const parsed = /^omp:([a-f0-9]{24}):([a-z]+[0-9]*(?:-[0-9]+)?)$/.exec(query.data ?? "");
     const pending = parsed ? this.pending.get(parsed[1]!) : undefined;
-    const reject = async (text = "This request is expired, unauthorized, or already being handled.") => {
+    const acknowledge = async (text?: string) => {
       try { await this.api.answerCallbackQuery(query.id, { text }); }
       catch (error) { this.report(telegramDeliveryError(error)); }
     };
+    const reject = (text = "This request is expired, unauthorized, or already being handled.") => acknowledge(text);
     if (!parsed || query.from.is_bot || String(query.from.id) !== this.options.ownerId || !pending?.active || !pending.verified || pending.busy || !this.handlers ||
       !query.message || !("date" in query.message) || query.message.date === 0 || !this.matchesCard(pending, query.message as Message)) { await reject(); return; }
     this.assertRoute(pending.approval.route);
@@ -548,12 +561,13 @@ export class TelegramMessenger implements Messenger {
     try {
       const action = parsed[2]!;
       const dialog = pending.dialog;
-      if (action === "cancel") await this.finish(pending, { cancelled: true }, eventId);
-      else if (dialog.method === "confirm" && (action === "yes" || action === "no")) await this.finish(pending, { confirmed: action === "yes" }, eventId);
+      let response: DialogResponse | undefined;
+      if (action === "cancel") response = { cancelled: true };
+      else if (dialog.method === "confirm" && (action === "yes" || action === "no")) response = { confirmed: action === "yes" };
       else if (dialog.method === "select" && /^pick-[0-9]+$/.test(action)) {
         const option = dialog.options[Number(action.slice(5))];
         if (option === undefined) { await reject(); return; }
-        await this.finish(pending, { value: option }, eventId);
+        response = { value: option };
       } else if (dialog.method === "ask") {
         const question = dialog.questions[pending.question]!;
         const choice = new RegExp(`^q${pending.question}-([0-9]+)$`).exec(action);
@@ -576,12 +590,14 @@ export class TelegramMessenger implements Messenger {
           }
           pending.answers.push(answer);
           pending.question++; pending.selected = []; pending.customInput = undefined;
-          if (pending.question === dialog.questions.length) { await this.finish(pending, { answers: pending.answers }, eventId); return; }
+          if (pending.question === dialog.questions.length) response = { answers: pending.answers };
         } else { await reject(); return; }
-        pending.lastUpdate = eventId; this.save(pending); await this.refresh(pending);
       } else { await reject(); return; }
-      // Spinner acknowledgement follows durable/native processing, never before.
-      try { await this.api.answerCallbackQuery(query.id); } catch (error) { this.report(telegramDeliveryError(error)); }
+      if (response) await this.finish(pending, response, eventId, acknowledge);
+      else {
+        pending.lastUpdate = eventId; this.save(pending); await this.refresh(pending);
+        await acknowledge();
+      }
     } finally { pending.busy = false; }
   }
 

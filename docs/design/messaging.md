@@ -165,19 +165,24 @@ Telegram free-form input is an exact reply to the active original bot card;
 partial responses are tracked and recover on that same card. A pending answer
 can be looked up even for a queued, inactive card. Keep content-free identities
 of closed cards so stale replies cannot become tasks, and drop closed-dialog
-partial answer progress. Slack buttons and modals validate card/view identity
-and metadata; final answers are admitted before ACK. Unsupported or secret input
-is not approximated or auto-approved: cancel the native request and direct the
-operator to the appropriate local UI.
+partial answer progress. Final Telegram button callbacks and Slack responses
+are acknowledged only after durable admission. Slack buttons and modals validate
+card/view identity and metadata, and the same Slack question card shows whether
+an answer was submitted or the question was cancelled. Discord and Slack accept
+free-form drafts in native modals without echoing their contents on the channel
+card. Unsupported or secret input is not approximated or auto-approved: cancel
+the native request and direct the operator to the appropriate local UI.
 
 [`decision_ask`](../../src/decision-tool.ts) uses native `askDialog`; it is not a
 parallel approval engine. [Decision records](../../src/decisions.ts) link the
 native tool call, original source and original question/card. `answering` is an
 attempt, not the `answered` state confirmed by native settlement. A lane's
-source-bound question can go to head review first. The head may select an
-original option only for a routine reversible choice within the assignment and
-report it after native confirmation; otherwise it opens the original owner
-card. This is not authority to grant tool permission or manufacture user
+source-bound question goes to head review first. For a routine reversible
+choice within the assignment, the head returns an original option to the lane
+and records the reason internally, without a separate messenger message. When
+the owner must decide, the original card shows why their decision is needed
+alongside the unchanged questions and choices. Recommendations are not
+preselected. This is not authority to grant tool permission or manufacture user
 consent. Recommendation, silence, normal text, quotes and reports are not
 approval.
 

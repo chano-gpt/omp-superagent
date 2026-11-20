@@ -949,29 +949,82 @@ describe("Telegram approvals and exact-card interaction", () => {
     http.callback(8, id, "next-0"); await drain();
     expect(answers[0]?.response).toEqual({ answers: [{ id: "q", selectedOptions: ["A", "B"] }] });
   });
-  test("ask multi/free-text progress survives restart and re-edits the same authoritative card", async () => {
+  test("ask progress survives restart on the original card and final submit ACK waits for admission", async () => {
     const http = new TelegramHttp(); const ledger = store();
     const first = await fixture({ http, ledger });
-    const a = approval({ request: { method: "ask", questions: [
+    const reason = "The head needs this answer before continuing.";
+    const a = approval({ ownerContext: `${reason} ${"🙂".repeat(2100)}`, request: { method: "ask", questions: [
       { id: "q1", question: "Choose several", multi: true, options: [{ label: "A" }, { label: "B" }] },
       { id: "q2", question: "Choose or type", options: [] },
     ] } });
     const id = Number(await first.messenger.showApproval(a));
+    const card = http.remote.get(id)!;
+    expect(card.text).toContain(reason);
+    expect(card.text).toContain("Choose several");
+    expect(card.text?.length).toBeLessThanOrEqual(4096);
+    expect(card.reply_markup?.inline_keyboard.flat().map(button => button.text)).toEqual(["1. A", "2. B", "Next question", "Cancel"]);
     http.callback(1, id, "q0-0"); await drain();
     http.callback(2, id, "q0-1"); await drain();
     http.update(3, message({ message_thread_id: 7, text: "plus free text", reply_to_message: structuredClone(http.remote.get(id)!) })); await drain();
     await first.messenger.stop();
-    const second = await fixture({ http, ledger });
+    const admission = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<{ id: string; response: DialogResponse; route: Route }>();
+    const second = await fixture({ http, ledger, answer: async (id, response, route) => {
+      entered.resolve({ id, response, route });
+      await admission.promise;
+    } });
     expect(await second.messenger.showApproval({ ...a, remoteId: String(id) })).toBe(String(id));
     expect(http.calls.filter(call => call.method === "sendMessage")).toHaveLength(1);
     expect(http.calls.filter(call => call.method === "editMessageText").length).toBeGreaterThanOrEqual(4);
     http.callback(4, id, "next-0"); await drain();
     http.update(5, message({ message_thread_id: 7, text: "second answer", reply_to_message: structuredClone(http.remote.get(id)!) })); await drain();
-    http.callback(6, id, "next-1"); await drain();
-    expect(second.answers[0]?.response).toEqual({ answers: [
-      { id: "q1", selectedOptions: ["A", "B"], customInput: "plus free text" },
-      { id: "q2", selectedOptions: [], customInput: "second answer" },
-    ] });
+    const queryId = "submit-original-ask";
+    const submitAcks = () => http.calls.filter(call => call.method === "answerCallbackQuery" && call.payload.callback_query_id === queryId);
+    http.callback(6, id, "next-1", { id: queryId });
+    try {
+      expect(await entered.promise).toEqual({ id: a.id, route: a.route, response: { answers: [
+        { id: "q1", selectedOptions: ["A", "B"], customInput: "plus free text" },
+        { id: "q2", selectedOptions: [], customInput: "second answer" },
+      ] } });
+      await drain();
+      expect(submitAcks()).toHaveLength(0);
+      expect(ledger.getMeta("telegram:900:offset")).toBe("6");
+    } finally { admission.resolve(); }
+    await eventually(() => ledger.getMeta("telegram:900:offset") === "7");
+    expect(submitAcks().map(call => call.payload)).toEqual([{ callback_query_id: queryId }]);
+    expect(http.remote.get(id)?.reply_markup?.inline_keyboard).toEqual([]);
+  });
+  test.each(["answerCallbackQuery", "editMessageReplyMarkup"] as const)("a final ask %s failure does not replay the answer or replace the card", async method => {
+    const { messenger, http, ledger, answers, errors } = await fixture();
+    const a = approval({ request: { method: "ask", questions: [
+      { id: "scope", question: "Which scope?", options: [{ label: "Local" }] },
+    ] } });
+    const id = Number(await messenger.showApproval(a));
+    http.callback(1, id, "q0-0"); await eventually(() => ledger.getMeta("telegram:900:offset") === "2");
+    const card = structuredClone(http.remote.get(id)!);
+    const submit = card.reply_markup?.inline_keyboard.flat().find(button => "callback_data" in button && button.callback_data.endsWith(":next-0"));
+    if (!submit || !("callback_data" in submit)) throw new Error("Expected the original ask's submit control");
+    const queryId = "final-ask-with-failed-feedback";
+    http.fail(method, new Error("connection lost after write"));
+    http.callback(2, id, "next-0", { id: queryId });
+    await eventually(() => errors.length === 1);
+    if (method === "answerCallbackQuery") await eventually(() => ledger.getMeta("telegram:900:offset") === "3");
+    else expect(ledger.getMeta("telegram:900:offset")).toBe("2");
+    await messenger.stop();
+
+    const second = await fixture({ http, ledger });
+    await expect(second.messenger.showApproval({ ...a, remoteId: String(id) })).rejects.toThrow("unresolved outcome");
+    http.push({ update_id: 3, callback_query: { id: "expired-submit", from: { id: 42, is_bot: false, first_name: "Owner" },
+      chat_instance: "chat-instance", message: card, data: submit.callback_data } });
+    http.update(4, message({ message_thread_id: 7, text: "late answer", reply_to_message: { ...card, reply_markup: undefined } }));
+    await eventually(() => ledger.getMeta("telegram:900:offset") === "5");
+    expect(answers).toEqual([{ id: a.id, route: a.route, response: { answers: [{ id: "scope", selectedOptions: ["Local"] }] } }]);
+    expect(second.answers).toEqual([]);
+    expect(second.received).toEqual([]);
+    expect(http.calls.filter(call => call.method === "answerCallbackQuery" && call.payload.callback_query_id === queryId).map(call => call.payload))
+      .toEqual([{ callback_query_id: queryId }]);
+    expect(http.calls.filter(call => call.method === "editMessageReplyMarkup")).toHaveLength(1);
+    expect(http.calls.filter(call => call.method === "sendMessage")).toHaveLength(1);
   });
   test("missing/uncertain edits never send a replacement card; ambiguous initial send cannot resend", async () => {
     const { messenger, http } = await fixture();

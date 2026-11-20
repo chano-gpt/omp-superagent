@@ -517,7 +517,11 @@ export class DiscordMessenger implements Messenger {
       this.button(pending, `next-${pending.question}`, pending.question + 1 === dialog.questions.length ? "Submit all answers" : "Next question", ButtonStyle.Primary), cancel,
     ));
     const previews = question.options.map((option, index) => `${index + 1}. ${option.label}${index === question.recommended ? " (recommended, not preselected)" : ""}${option.preview ? `\n${option.preview}` : ""}`).join("\n");
-    return { content: `Question ${pending.question + 1}/${dialog.questions.length}${question.header ? ` — ${question.header}` : ""}\n${question.question}\n${question.multi ? "Multiple answers allowed." : "Choose one option OR free text."}\n${previews}\n${pending.customInput ? `Free text: ${pending.customInput}` : ""}`, components };
+    const context = pending.approval.ownerContext;
+    return { content: [`Question ${pending.question + 1}/${dialog.questions.length}${question.header ? ` — ${question.header}` : ""}`,
+      question.question, context ? `Why your decision is needed: ${context}` : "",
+      question.multi ? "Multiple answers allowed." : "Choose one option OR free text.",
+      previews, pending.customInput ? "Free text entered." : ""].filter(Boolean).join("\n"), components };
   }
 
   async showApproval(approval: Approval): Promise<string> {

@@ -675,8 +675,6 @@ try {
     const choice: Inbound = { id: "209", messageId: "209", route: thread, receivedAt: Date.now(), attachments: [],
       text: "Choose a reversible cache layout for the active local lane." };
     await messenger.deliver(choice);
-    await until(() => messenger.sent.some(output => output.replyTo?.messageId === choice.messageId
-      && output.text.includes("Flat") && output.text.includes("simpler and reversible")), "HEAD's confirmed choice and reason on the original request");
     await until(() => messenger.sent.some(output => output.text === "HEAD:209"), "the original lane continues after the confirmed native choice");
     const usage: Inbound = { id: "210", messageId: "210", route: thread, receivedAt: Date.now(), attachments: [], text: "/usage" };
     await messenger.deliver(usage);
@@ -684,6 +682,8 @@ try {
     await until(() => usageReply() !== undefined, "stock OMP usage reply from the production HEAD extension");
     assert.deepEqual(usageReply()?.route, thread);
     assert.match(usageReply()?.text ?? "", /보고된 계정 한도가 없습니다/);
+    assert.deepEqual(messenger.sent.filter(output => output.replyTo?.messageId === choice.messageId).map(output => output.text),
+      ["HEAD:209"], "The normal lane result must not be preceded by a separate native choice notice");
     const afterUsage = parseSessionEntries(await fs.readFile(mainPaths.sessionFile, "utf8"));
     assert(!requestIds(afterUsage).includes(usage.id), "Usage must not enter the native conversation");
   }

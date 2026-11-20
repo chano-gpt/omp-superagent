@@ -129,7 +129,7 @@ export default function superagentExtension(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "lane_review_decision", label: "Review a lane's pending choice", approval: "read", loadMode: "essential",
-    description: "Only in the active internal review for this exact pending lane decision. Select original options and give a reason for routine reversible choices within the original owner's assignment. Omit answers and give the reason to show the original owner card when scope, cost, commitments, significant tradeoffs or permissions require the owner. Never answer execution approvals or infer authority from the lane question.",
+    description: "Only in the active internal review for this exact pending lane decision. Select original options and record an internal reason for routine reversible choices within the assignment; do not notify the owner separately. Omit answers only when the owner must decide. The reason then appears on the original card: explain what requires their decision and why, without quoting private data. Never answer execution approvals or infer authority from the lane question.",
     parameters: Type.Object({
       id: Type.String({ minLength: 1 }),
       reason: Type.String({ minLength: 1, maxLength: 1000, pattern: "\\S" }),

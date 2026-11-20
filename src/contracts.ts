@@ -207,6 +207,8 @@ export interface Approval {
   state: "pending" | "answered" | "cancelled";
   remoteId: string | null;
   decision?: { id: string; sourceId: string | null; sessionId: string };
+  /** Presentation only; not part of the original native question or card identity. */
+  readonly ownerContext?: string;
 }
 
 export interface ApprovalResolution {

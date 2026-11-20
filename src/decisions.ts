@@ -113,13 +113,6 @@ export function acknowledgeDecision(store: StorePort, approval: Approval, sessio
   if (!receipt || receipt.approvalId !== approval.id || approval.state === "answered" && !receipt.response)
     throw new Error("Decision answer receipt is missing");
   if (receipt.confirmedAt !== undefined) return;
-  if (receipt.headSelection && receipt.response?.answers) {
-    const { reviewId, reason } = receipt.headSelection;
-    store.queueOutput({
-      id: `${reviewId}:selected`, sourceId: reviewId, route: approval.route,
-      text: `헤드가 레인 대신 선택했습니다: ${receipt.response.answers.flatMap(answer => answer.selectedOptions).join(", ")}\n이유: ${reason}`,
-    });
-  }
   receipt.confirmedAt = Date.now();
   if (receipt.response?.cancelled) receipt.withdrawal = { at: receipt.confirmedAt, reason: "Owner cancelled the original question" };
   store.setMeta(metadataKey, JSON.stringify(records));

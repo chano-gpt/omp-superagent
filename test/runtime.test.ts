@@ -5950,7 +5950,7 @@ describe("real Store runtime coordination", () => {
     return { ...f, source, host, decision, frame, approval, lane, answers: [{ id: `${decision}:0`, selectedOptions: ["Flat"] }] };
   }
 
-  test("HEAD answers the exact routine lane choice and reports its reason without opening an owner card", async () => {
+  test("HEAD answers the exact routine lane choice without a card, progress message, or separate result", async () => {
     const f = await laneDecision();
     expect(f.messenger.shown.size).toBe(0);
     await expect(f.messenger.handlers!.answer(f.approval.approvalId, { answers: f.answers }, f.source.route)).rejects.toMatchObject({ certainty: "rejected" });
@@ -5958,21 +5958,40 @@ describe("real Store runtime coordination", () => {
       answers: [{ ...f.answers[0]!, selectedOptions: ["Invented"] }] })).rejects.toMatchObject({ certainty: "rejected" });
     expect(f.host.responses).toEqual([]);
 
+    f.main.emit({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [
+      { type: "text", text: "Internal review in progress" },
+      { type: "toolCall", id: "choose", name: "lane_review_decision", arguments: {} },
+    ] } });
     const selected = await f.runtime.reviewLaneDecision({ id: f.decision, reason: "Local and reversible", answers: f.answers });
-    await f.messenger.whenSent(1);
+    f.main.complete("Internal review result");
+    await admit(f.runtime, message("after-choice", f.source.route));
+    await f.main.whenPrompts(3);
+    await f.runtime.kick();
     expect(selected).toMatchObject({ state: "answered", headSelection: { reason: "Local and reversible" }, response: { answers: f.answers } });
     expect(f.host.responses).toEqual([{ id: f.frame.id, response: { answers: f.answers } }]);
-    expect(f.messenger.sent).toMatchObject([{ route: f.source.route, replyTo: { messageId: f.source.messageId } }]);
-    expect(f.messenger.sent[0]?.text).toContain("Flat");
-    expect(f.messenger.sent[0]?.text).toContain("Local and reversible");
+    expect(f.messenger.attempted).toEqual([]);
     expect(f.messenger.shown.size).toBe(0);
   });
 
   test("HEAD escalation opens the original lane question and leaves its answer to the owner", async () => {
     const f = await laneDecision();
+    const duplicate = { ...f.frame, id: "head-duplicate-question" };
+    f.main.state.pendingUiRequests = [duplicate];
+    f.main.emit(duplicate);
+    await f.runtime.kick();
+    expect(f.main.responses).toEqual([{ id: duplicate.id, response: { cancelled: true } }]);
+    expect(f.messenger.shown.size).toBe(0);
+
     const escalated = await f.runtime.reviewLaneDecision({ id: f.decision, reason: "Requires an owner commitment" });
     expect(escalated).toMatchObject({ state: "pending", requestId: f.frame.id, remoteId: `card-${f.approval.approvalId}` });
+    expect(f.messenger.shown.get(f.approval.approvalId)).toMatchObject({
+      route: f.source.route, request: f.frame, ownerContext: "Requires an owner commitment",
+    });
     expect(f.host.responses).toEqual([]);
+    await f.messenger.handlers!.reconnect!();
+    expect(f.messenger.shown.get(f.approval.approvalId)).toMatchObject({
+      remoteId: escalated.remoteId, request: f.frame, ownerContext: "Requires an owner commitment",
+    });
     await expect(f.runtime.reviewLaneDecision({ id: f.decision, reason: "Trying to bypass the owner", answers: f.answers })).rejects.toThrow("original pending lane choice");
 
     await f.messenger.handlers!.answer(f.approval.approvalId, { answers: f.answers }, f.source.route);

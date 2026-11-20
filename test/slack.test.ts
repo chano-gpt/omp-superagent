@@ -878,25 +878,82 @@ describe("Slack native approval controls", () => {
     } finally { await f.messenger.stop(); }
   });
 
-  test("ask supports multiple questions, exact choices, free text, optional selection, and stale question rejection", async () => {
-    const f = await fixture();
-    const id = await f.messenger.showApproval(approval({ request: { method: "ask", questions: [
-      { id: "one", header: "First", question: "Choose many", multi: true, recommended: 1, options: [{ label: "A", preview: "Full preview <!everyone>" }, { label: "B", description: "Exact description" }] },
-      { id: "two", question: "Choose or type", options: [{ label: "Native label" }] },
-    ] } }));
-    const remote = f.http.remote.get(`CALLOWED:${id}`)!;
-    expect(remote.text).toContain("recommended, not preselected");
-    for (const event of [selection(remote, "choose-0", ["0", "1"], true), click(remote, "other-0")]) { f.socket.emit("slack_event", event); await event.done; await drain(); }
-    const firstView = f.http.views[0]!;
-    const custom = submit(firstView, " free text "); f.socket.emit("slack_event", custom); await custom.done; await drain();
-    const next = click(remote, "next-0"); f.socket.emit("slack_event", next); await next.done; await drain();
-    const stale = selection(remote, "choose-0", ["0"], true); f.socket.emit("slack_event", stale); await stale.done;
-    const choose = selection(remote, "choose-1", ["0"]); f.socket.emit("slack_event", choose); await choose.done; await drain();
-    const other = click(remote, "other-1"); f.socket.emit("slack_event", other); await other.done; await drain();
-    const second = submit(f.http.views[1]!, "Native free text"); f.socket.emit("slack_event", second); await second.done; await drain();
-    const submitAll = click(remote, "next-1"); f.socket.emit("slack_event", submitAll); await submitAll.done;
-    expect(f.answers[0]!.response).toEqual({ answers: [{ id: "one", selectedOptions: ["A", "B"], customInput: " free text " }, { id: "two", selectedOptions: [], customInput: "Native free text" }] });
-    await f.messenger.stop();
+  test("ask keeps multiple choices and modal drafts exact and private, then marks the original card submitted after admission", async () => {
+    const http = new SlackHTTP();
+    const admission = Promise.withResolvers<void>();
+    const durable = Promise.withResolvers<void>();
+    const answers: { id: string; response: DialogResponse; route: Route }[] = [];
+    const f = await fixture(http, { answer: async (id, response, route) => {
+      answers.push({ id, response, route });
+      admission.resolve();
+      await durable.promise;
+    } });
+    const ownerContext = "HEAD needs an owner choice before changing scope.";
+    const original = approval({
+      route: { ...route, threadId: "1000.000001" },
+      ownerContext,
+      request: { method: "ask", questions: [
+        { id: "one", header: "First", question: "Choose many", multi: true, recommended: 1, options: [{ label: "A", preview: "Full preview <!everyone>" }, { label: "B", description: "Exact description" }] },
+        { id: "two", question: "Choose or type", options: [{ label: "Native label" }] },
+      ] },
+    });
+    const firstDraft = "  private-first-draft <@UOTHER>\n";
+    const secondDraft = "private-second-draft & exact ";
+    const id = await f.messenger.showApproval(original);
+    const stored = { ...original, remoteId: id };
+    const remote = http.remote.get(`CALLOWED:${id}`)!;
+    const cardBlockId = remote.blocks[0].block_id;
+    try {
+      expect(remote.text).toContain(ownerContext);
+      expect(remote.blocks[0].text.type).toBe("plain_text");
+      expect(remote.blocks[0].text.text).toContain(ownerContext);
+      expect(remote.text).toContain("recommended, not preselected");
+      for (const event of [selection(remote, "choose-0", ["0", "1"], true), click(remote, "other-0")]) { f.socket.emit("slack_event", event); await event.done; await drain(); }
+      const custom = submit(http.views[0]!, firstDraft); f.socket.emit("slack_event", custom); await custom.done; await drain();
+      expect(remote.text).toMatch(/draft saved privately/i);
+      expect(JSON.stringify(remote)).not.toContain("private-first-draft");
+      const reopen = click(remote, "other-0"); f.socket.emit("slack_event", reopen); await reopen.done; await drain();
+      expect(http.views[1]!.blocks[0].element.initial_value).toBe(firstDraft);
+      const next = click(remote, "next-0"); f.socket.emit("slack_event", next); await next.done; await drain();
+      const stale = selection(remote, "choose-0", ["0"], true); f.socket.emit("slack_event", stale); await stale.done;
+      const choose = selection(remote, "choose-1", ["0"]); f.socket.emit("slack_event", choose); await choose.done; await drain();
+      const other = click(remote, "other-1"); f.socket.emit("slack_event", other); await other.done; await drain();
+      expect(http.views[2]!.blocks[0].element.initial_value).toBeUndefined();
+      const second = submit(http.views[2]!, secondDraft); f.socket.emit("slack_event", second); await second.done; await drain();
+
+      const submitAll = click(remote, "next-1"); f.socket.emit("slack_event", submitAll); await admission.promise;
+      // The consuming head can call dismiss via Gateway before the adapter's
+      // answer callback completes, or after the callback has edited the card.
+      const dismissed: Approval = { ...stored, state: "answered" };
+      await f.messenger.dismissApproval(dismissed);
+      expect(remote.text).not.toMatch(/submitted|cancelled|closed/i);
+      expect(remote.blocks.some((block: Data) => block.type === "actions")).toBe(true);
+      expect(submitAll.acks).toEqual([]);
+      durable.resolve(); await submitAll.done;
+      await f.messenger.dismissApproval(dismissed);
+
+      expect(answers).toEqual([{ id: original.id, route: original.route, response: { answers: [
+        { id: "one", selectedOptions: ["A", "B"], customInput: firstDraft },
+        { id: "two", selectedOptions: [], customInput: secondDraft },
+      ] } }]);
+      expect(remote.text).toMatch(/answers submitted/i);
+      expect(remote.text).toContain(ownerContext);
+      expect(remote.blocks.some((block: Data) => block.type === "actions")).toBe(false);
+      expect(remote).toMatchObject({ ts: id, thread_ts: original.route.threadId, user: bot, team });
+      expect(remote.blocks[0].block_id).toBe(cardBlockId);
+      const channelWrites = http.calls.filter(call => call.method === "chat.postMessage" || call.method === "chat.update");
+      expect(channelWrites.filter(call => call.method === "chat.postMessage")).toHaveLength(1);
+      expect(JSON.stringify(channelWrites)).not.toMatch(/private-(first|second)-draft/);
+    } finally { durable.resolve(); await f.messenger.stop(); }
+
+    const restarted = await fixture(http);
+    try {
+      await restarted.messenger.dismissApproval({ ...stored, state: "answered" });
+      expect(await restarted.messenger.showApproval(stored)).toBe(id);
+      const late = click(remote, "next-1"); restarted.socket.emit("slack_event", late); await late.done;
+      expect(remote.text).toMatch(/answers submitted/i);
+      expect(restarted.answers).toEqual([]);
+    } finally { await restarted.messenger.stop(); }
   });
 
   test("modal close reopens safely; cancel dismisses card and invalidates already-open modal", async () => {
@@ -911,6 +968,59 @@ describe("Slack native approval controls", () => {
     const stale = submit(f.http.views[1]!, "late"); f.socket.emit("slack_event", stale); await stale.done;
     expect(f.answers.map(answer => answer.response)).toEqual([{ cancelled: true }]);
     await f.messenger.stop();
+  });
+
+  test("ask cancel removes the original controls, keeps drafts private, and survives duplicate dismissal", async () => {
+    const f = await fixture();
+    const original = approval({ request: { method: "ask", questions: [{ id: "choice", question: "Choose or type", options: [{ label: "A" }] }] } });
+    try {
+      const id = await f.messenger.showApproval(original);
+      const remote = f.http.remote.get(`CALLOWED:${id}`)!;
+      const open = click(remote, "other-0"); f.socket.emit("slack_event", open); await open.done; await drain();
+      const draft = submit(f.http.views[0]!, "private-cancel-draft"); f.socket.emit("slack_event", draft); await draft.done; await drain();
+      const reopen = click(remote, "other-0"); f.socket.emit("slack_event", reopen); await reopen.done; await drain();
+      const cancel = click(remote, "cancel"); f.socket.emit("slack_event", cancel); await cancel.done;
+      await f.messenger.dismissApproval({ ...original, remoteId: id, state: "answered" });
+      const stale = submit(f.http.views[1]!, "late"); f.socket.emit("slack_event", stale); await stale.done;
+      expect(f.answers).toEqual([{ id: original.id, response: { cancelled: true }, route: original.route }]);
+      expect(remote.text).toMatch(/request cancelled/i);
+      expect(remote.blocks.some((block: Data) => block.type === "actions")).toBe(false);
+      expect(JSON.stringify(f.http.calls.filter(call => call.method.startsWith("chat.")))).not.toContain("private-cancel-draft");
+    } finally { await f.messenger.stop(); }
+  });
+
+  test.each(["answer", "update", "ack"] as const)("an ask %s failure cannot re-admit an answer", async failed => {
+    const http = new SlackHTTP();
+    let attempts = 0;
+    const f = await fixture(http, { answer: async () => {
+      attempts++;
+      if (failed === "answer") throw new Error("durable admission failed");
+    } });
+    const original = approval({ request: { method: "ask", questions: [{ id: "choice", question: "Pick one", options: [{ label: "A" }] }] } });
+    try {
+      const id = await f.messenger.showApproval(original);
+      const remote = http.remote.get(`CALLOWED:${id}`)!;
+      const selected = selection(remote, "choose-0", ["0"]); f.socket.emit("slack_event", selected); await selected.done; await drain();
+      const staleCard = clone(remote);
+      if (failed === "update") http.behavior.set("chat.update", () => ({ ok: false, error: "internal_error" }));
+      const final = click(remote, "next-0");
+      if (failed === "ack") final.ack = async () => { throw new Error("lost ACK"); };
+      f.socket.emit("slack_event", final); await drain();
+      expect(f.errors).toHaveLength(1);
+      expect(final.acks).toEqual([]);
+      if (failed === "answer") {
+        expect(remote.text).toMatch(/request closed/i);
+        expect(remote.text).not.toMatch(/submitted|cancelled/i);
+      } else if (failed === "ack") {
+        expect(remote.text).toMatch(/answers submitted/i);
+      } else {
+        expect(remote.text).not.toMatch(/submitted|cancelled|closed/i);
+        http.behavior.delete("chat.update");
+      }
+      expect(await f.messenger.showApproval({ ...original, remoteId: id })).toBe(id);
+      const retry = click(staleCard, "next-0"); f.socket.emit("slack_event", retry); await retry.done;
+      expect(attempts).toBe(1);
+    } finally { await f.messenger.stop(); }
   });
 
   test("restart rehydrates matching owned card through authoritative history; foreign receipt is never edited", async () => {

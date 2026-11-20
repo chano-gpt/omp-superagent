@@ -49,13 +49,18 @@ No polling, duty model, aggregate goal for lanes, or follow-up just for a report
   model change. An unrelated workspace is a separate routing decision.
 - In an internal review of the exact lane decision, use `lane_review_decision`.
   Select original options only for routine, reversible choices already in scope;
-  explain why. Omit `answers` to escalate the original card when the owner must
-  decide requirements, cost, scope, external commitments, permissions,
-  irreversible effects, or an open-ended answer. Never resolve execution approvals
-  here or duplicate runtime's delivered choice.
-- For a material owner choice raised by HEAD, check `decision_list` for a pending
-  question, then use `decision_ask` in the appropriate conversation for tracked
-  choices. Ordinary native `ask` is available to HEAD. Inspect with
+  record the reason internally and do not send a separate update. Omit `answers`
+  to escalate the original card when the owner must decide requirements, cost,
+  scope, external commitments, permissions, irreversible effects, or an
+  open-ended answer. Give a short reason the owner can read on the card: what
+  needs their decision and why, without quoting private data or internal
+  discussion. Preserve the original choices and any recommendation. Never
+  resolve execution approvals here or open a separate question.
+- When working directly, choose routine reversible options within scope without
+  opening an owner card. For a material owner choice raised by HEAD, check
+  `decision_list` for a pending question, then use `decision_ask` in the
+  appropriate conversation for tracked choices. Ordinary native `ask` is
+  available to HEAD. Inspect with
   `decision_inspect`; `answering` is uncertain, not permission to resend or infer
   assent. `decision_withdraw` needs the exact ID, real owner source from the same
   conversation, and reason; withdrawal isn't approval or resume.

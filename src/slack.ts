@@ -16,10 +16,13 @@ type Http = (input: string | URL | Request, init?: RequestInit) => Promise<Respo
 type Envelope = { type: string; envelope_id?: string; body: RecordValue; accepts_response_payload?: boolean; ack(response?: unknown): Promise<void> };
 type Block = RecordValue;
 type Answer = NonNullable<DialogResponse["answers"]>[number];
+const askClosureText = { closed: "Request closed.", submitted: "Answers submitted.", cancelled: "Request cancelled." } as const;
+type CardClosure = keyof typeof askClosureText;
 interface Pending {
   approval: Approval; token: string; dialog: Dialog; messageId: string | null;
   active: boolean; question: number; answers: Answer[];
   selected: string[]; customInput?: string;
+  askAnswerClaimed?: true;
   modal?: { id: string; metadata: string; action: string };
 }
 
@@ -368,7 +371,7 @@ export class SlackMessenger implements Messenger {
     if (Buffer.byteLength(JSON.stringify(dialog), "utf8") > 100 * 1024) throw new DeliveryError("Slack dialog exceeds the safe card size; use the local OMP interface", "rejected");
   }
 
-  private view(pending: Pending): { text: string; blocks: Block[] } {
+  private view(pending: Pending, closure?: CardClosure): { text: string; blocks: Block[] } {
     const dialog = pending.dialog;
     let text: string;
     const controls: Block[] = [];
@@ -387,7 +390,7 @@ export class SlackMessenger implements Messenger {
       controls.push(actions([{ type: "static_select", action_id: this.control(pending, "select"), placeholder: plain("Choose one option"), options: dialog.options.map((label, index) => ({ text: plain(label), value: String(index), ...(dialog.details[index] ? { description: plain(dialog.details[index]!) } : {}) })) }]), actions([cancel]));
     } else {
       const question = dialog.questions[pending.question]!;
-      text = `Question ${pending.question + 1}/${dialog.questions.length}${question.header ? ` — ${question.header}` : ""}\n${question.question}\n${question.multi ? "Multiple answers allowed." : "Choose one option OR free text."}\n${question.options.map((option, index) => `${index + 1}. ${option.label}${index === question.recommended ? " (recommended, not preselected)" : ""}${option.preview ? `\n${option.preview}` : ""}`).join("\n")}${pending.customInput !== undefined ? `\nFree text: ${pending.customInput}` : ""}`;
+      text = `Question ${pending.question + 1}/${dialog.questions.length}${question.header ? ` — ${question.header}` : ""}\n${question.question}\n${question.multi ? "Multiple answers allowed." : "Choose one option OR free text."}\n${question.options.map((option, index) => `${index + 1}. ${option.label}${index === question.recommended ? " (recommended, not preselected)" : ""}${option.preview ? `\n${option.preview}` : ""}`).join("\n")}`;
       if (question.options.length) {
         const options = question.options.map((option, index) => ({ text: plain(option.label), value: String(index), ...(option.description ? { description: plain(option.description) } : {}) }));
         const selected = options.filter((_, index) => pending.selected.includes(question.options[index]!.label));
@@ -398,11 +401,28 @@ export class SlackMessenger implements Messenger {
       }
       controls.push(actions([this.button(pending, `other-${pending.question}`, "Other / free text"), this.button(pending, `next-${pending.question}`, pending.question + 1 === dialog.questions.length ? "Submit all answers" : "Next question"), cancel]));
     }
-    const blocks = [...sections(text), ...controls];
+    const room = 39000 - text.length;
+    if (room < 0) throw new DeliveryError("Slack dialog exceeds the message text limit; use the local OMP interface", "rejected");
+    const context = pending.approval.ownerContext;
+    if (dialog.method === "ask" && context) {
+      const prefix = "Why your decision is needed: ";
+      const available = room - prefix.length - 2;
+      if (available > 0) {
+        const reason = context.length <= available ? context : `${context.slice(0, available - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
+        text = `${prefix}${reason}\n\n${text}`;
+      }
+    }
+    const blocks = [...sections(text), ...(closure ? [] : controls)];
     // A compact correlation is required even on cards with no active controls.
     blocks[0] = { ...blocks[0], block_id: this.control(pending, "card") };
+    if (dialog.method === "ask") {
+      const footer = closure ? askClosureText[closure] : pending.customInput !== undefined ? "Free text draft saved privately." : undefined;
+      if (footer) {
+        blocks.push({ type: "section", ...(closure ? { block_id: this.control(pending, `status-${closure}`) } : {}), text: plain(footer) });
+        text += `\n\n${footer}`;
+      }
+    }
     this.messagePayload(text, blocks);
-    if (text.length > 39000) throw new DeliveryError("Slack dialog exceeds the message text limit; use the local OMP interface", "rejected");
     return { text, blocks };
   }
 
@@ -420,7 +440,7 @@ export class SlackMessenger implements Messenger {
     return message;
   }
 
-  private assertCard(message: RecordValue, pending: Pending): void {
+  private assertCard(message: RecordValue, pending: Pending): readonly unknown[] {
     if (message.ts !== pending.messageId || message.user !== this.botUserId || message.bot_id !== this.botId ||
       (message.team !== undefined && message.team !== this.options.teamId) ||
       (pending.approval.route.threadId ? message.thread_ts !== pending.approval.route.threadId : timestamp(message.thread_ts) && message.thread_ts !== message.ts) ||
@@ -430,16 +450,23 @@ export class SlackMessenger implements Messenger {
       if (string(block.block_id) && block.block_id.startsWith("omp:") && !block.block_id.startsWith(`omp:${pending.token}:`)) throw new DeliveryError("Slack card correlation does not match the approval generation", "rejected");
       for (const element of Array.isArray(block.elements) ? block.elements : []) if (object(element) && string(element.action_id) && !element.action_id.startsWith(`omp:${pending.token}:`)) throw new DeliveryError("Slack card controls belong to another approval", "rejected");
     }
+    return message.blocks;
   }
 
-  private async update(pending: Pending, inactive = false): Promise<void> {
-    if (!pending.messageId) return;
+  private async update(pending: Pending, closure?: CardClosure): Promise<boolean> {
+    if (!pending.messageId) return false;
     await this.destination(pending.approval.route);
     const message = await this.historyMessage(pending.approval.route, pending.messageId);
-    this.assertCard(message, pending);
-    const view = this.view(pending);
-    const blocks = inactive ? view.blocks.filter(block => block.type !== "actions") : view.blocks;
-    await this.api("chat.update", { channel: pending.approval.route.channelId, ts: pending.messageId, as_user: true, ...this.messagePayload(view.text, blocks) });
+    const blocks = this.assertCard(message, pending);
+    // Keep terminal status on the verified original card, even after the
+    // pending entry is gone or the Gateway has restarted. A generic closure
+    // can be superseded only by a known outcome.
+    const status = Object.keys(askClosureText).find(key =>
+      blocks.some(block => object(block) && block.block_id === this.control(pending, `status-${key}`)));
+    if (status === "submitted" || status === "cancelled" || (status === "closed" && (!closure || closure === "closed"))) return false;
+    const view = this.view(pending, closure);
+    await this.api("chat.update", { channel: pending.approval.route.channelId, ts: pending.messageId, as_user: true, ...this.messagePayload(view.text, view.blocks) });
+    return true;
   }
 
   async showApproval(approval: Approval): Promise<string> {
@@ -447,8 +474,8 @@ export class SlackMessenger implements Messenger {
     if (!this.handlers || approval.state !== "pending") throw new DeliveryError("Slack approval is not pending on a started messenger", "rejected");
     const token = approvalCardToken(approval);
     const existing = this.pending.get(token);
-    if (existing?.active && existing.messageId) {
-      if (approval.remoteId && approval.remoteId !== existing.messageId) throw new DeliveryError("Slack approval receipt does not match its active card", "rejected");
+    if (existing?.messageId && (existing.active || existing.askAnswerClaimed)) {
+      if (approval.remoteId && approval.remoteId !== existing.messageId) throw new DeliveryError("Slack approval receipt does not match its original card", "rejected");
       return existing.messageId;
     }
     for (const pending of this.pending.values()) if (pending.approval.id === approval.id) await this.dismissApproval(pending.approval);
@@ -465,17 +492,22 @@ export class SlackMessenger implements Messenger {
       // An existing receipt cannot be safely edited without its original parsed
       // card; verify its identity with a minimal safe confirm view first.
       const rejected: Pending = { approval: { ...approval, route: { ...approval.route } }, token, dialog: { method: "confirm", title: "Request cancelled", message: notice }, messageId: approval.remoteId, active: false, question: 0, answers: [], selected: [] };
-      if (rejected.messageId) await this.update(rejected, true);
-      else rejected.messageId = await this.post(approval.route, notice, [{ type: "section", block_id: this.control(rejected, "card"), text: plain(notice) }]);
+      if (rejected.messageId) {
+        if (!await this.update(rejected, "closed")) return rejected.messageId;
+      } else rejected.messageId = await this.post(approval.route, notice, [{ type: "section", block_id: this.control(rejected, "card"), text: plain(notice) }]);
       await this.handlers.answer(approval.id, { cancelled: true }, rejected.approval.route);
       return rejected.messageId;
     }
     const pending: Pending = { approval: { ...approval, route: { ...approval.route } }, token, dialog, messageId: approval.remoteId, active: false, question: 0, answers: [], selected: [] };
     try {
       this.pending.set(token, pending);
-      if (pending.messageId) await this.update(pending);
-      else pending.messageId = await this.post(approval.route, initialView.text, initialView.blocks);
-      pending.active = true;
+      if (pending.messageId) {
+        pending.active = await this.update(pending);
+        if (!pending.active) this.pending.delete(token);
+      } else {
+        pending.messageId = await this.post(approval.route, initialView.text, initialView.blocks);
+        pending.active = true;
+      }
       return pending.messageId;
     } catch (error) { this.pending.delete(token); throw failure(error); }
   }
@@ -484,6 +516,9 @@ export class SlackMessenger implements Messenger {
     this.assertRoute(approval.route);
     const token = approvalCardToken(approval);
     let pending = this.pending.get(token);
+    // The head may dismiss through Gateway while consuming the answer. Do not
+    // race the callback's terminal edit or wait on its own answer admission.
+    if (pending?.askAnswerClaimed) return;
     if (!pending && approval.remoteId) {
       let dialog: Dialog;
       try { dialog = parseDialog(approval.request); this.validateDialog(dialog); }
@@ -491,14 +526,20 @@ export class SlackMessenger implements Messenger {
       pending = { approval: { ...approval, route: { ...approval.route } }, token, dialog, messageId: approval.remoteId, active: false, question: 0, answers: [], selected: [] };
     }
     if (!pending) return;
+    await this.closeApprovalCard(pending, "closed");
+  }
+
+  private async closeApprovalCard(pending: Pending, closure: CardClosure): Promise<void> {
     pending.active = false;
     pending.modal = undefined;
-    try { await this.update(pending, true); }
+    pending.customInput = undefined;
+    pending.answers = [];
+    try { await this.update(pending, closure); }
     catch (error) {
       if (!(error instanceof DeliveryError) || !["Slack API rejected request: message_not_found", "Slack API rejected request: channel_not_found"].includes(error.message)) throw error;
     }
-    this.pending.delete(token);
-    this.interactionReceipts.delete(token);
+    this.pending.delete(pending.token);
+    this.interactionReceipts.delete(pending.token);
   }
 
   private async finish(pending: Pending, response: DialogResponse): Promise<void> {
@@ -507,8 +548,16 @@ export class SlackMessenger implements Messenger {
     // unlock the card for another answer; runtime remains native authority.
     pending.active = false;
     pending.modal = undefined;
-    try { await this.handlers!.answer(pending.approval.id, response, pending.approval.route); }
-    finally { await this.dismissApproval(pending.approval); }
+    const ask = pending.dialog.method === "ask";
+    if (ask) pending.askAnswerClaimed = true;
+    let closure: CardClosure = "closed";
+    try {
+      await this.handlers!.answer(pending.approval.id, response, pending.approval.route);
+      if (ask) closure = response.cancelled ? "cancelled" : "submitted";
+    } finally {
+      if (ask) await this.closeApprovalCard(pending, closure);
+      else await this.dismissApproval(pending.approval);
+    }
   }
 
   private async openModal(pending: Pending, action: string, trigger: unknown): Promise<void> {
