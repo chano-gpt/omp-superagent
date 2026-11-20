@@ -87,7 +87,10 @@ if (arg("--runner")) {
   const stop = () => {
     if (!existsSync(cleanup)) return;
     watcher.close();
-    void starting.then(service => service.stop()).catch(error => { console.error("Fixture cleanup failed", error); process.exitCode = 1; });
+    void starting.then(async service => {
+      try { await service.stop(); }
+      finally { await service.close(); }
+    }).catch(error => { console.error("Fixture cleanup failed", error); process.exitCode = 1; });
   };
   const watcher = watch(config.stateDir, { persistent: false }, stop);
   stop();

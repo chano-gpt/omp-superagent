@@ -6,6 +6,7 @@ import { startHost, HostConnection, type HostFrame, type HostOptions } from "../
 import { nativeDisabledProviders } from "./fixtures/native-extension";
 import { serviceCompletionRecorded } from "../src/host-protocol";
 import { decisionId } from "../src/decisions";
+import { prepareHostFixture, stopHostFixtures, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 import { nativeTestCommand } from "./fixtures/native-command";
 
 const nativeTest = process.env.OMP_SUPERAGENT_NATIVE_TEST === "1" ? test : test.skip;
@@ -64,10 +65,7 @@ async function proveForeignServiceSurvives(options: HostOptions, connection: Hos
   const root = path.dirname(options.socketPath);
   const owner = { ...options, socketPath: path.join(root, "foreign.sock"), sessionFile: path.join(root, "foreign.jsonl") };
   const host = await startHost(owner);
-  const foreign = await HostConnection.connect(owner.socketPath).catch(error => {
-    try { process.kill(host.pid, "SIGKILL"); } catch {}
-    throw error;
-  });
+  const foreign = await HostConnection.connect(owner.socketPath);
   const release = path.join(options.cwd, ".sa-release-foreign");
   const started = observe(foreign, frame => frame.type === "prompt_result" && frame.id === "foreign-start");
   const completed = observe(foreign, frame => frame.type === "message_end"
@@ -75,7 +73,6 @@ async function proveForeignServiceSurvives(options: HostOptions, connection: Hos
   const refused = observe(connection, frame => frame.type === "message_end"
     && (frame.message as { toolCallId?: string } | undefined)?.toolCallId === "native-foreign-service");
   const settled = observe(connection, frame => frame.type === "prompt_result" && frame.id === "native-foreign-service-proof");
-  let stopped = false;
   try {
     const identity = await foreign.client.getState();
     expect(await foreign.request({ type: "prompt", message: "[native-foreign-service-owner] Start the original service." },
@@ -98,12 +95,11 @@ async function proveForeignServiceSurvives(options: HostOptions, connection: Hos
     await foreign.client.waitForSettled(30_000);
     expect(await foreign.request({ type: "shutdown_host" })).toMatchObject({ success: true });
     await foreign.exited;
-    stopped = true;
+    await waitForFixtureProcessExit([host.pid, identity.adapterOwnerPid]);
   } finally {
     started.cancel(); completed.cancel(); refused.cancel(); settled.cancel();
     await fs.writeFile(release, "");
     await foreign.close();
-    if (!stopped) { try { process.kill(host.pid, "SIGKILL"); } catch {} }
   }
 }
 
@@ -119,6 +115,7 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
   const agentDirectory = path.join(root, "agent");
   const cwd = path.join(root, "workspace");
   for (const directory of [home, agentDirectory, cwd]) await fs.mkdir(directory, { mode: 0o700 });
+  await prepareHostFixture(cwd);
   const configPath = path.join(agentDirectory, "config.yml");
   await fs.writeFile(configPath, JSON.stringify({ task: { maxConcurrency: 1 }, disabledProviders: nativeDisabledProviders,
     bash: { patterns: [{ match: "printf 'superagent-service-completed\\n'", approval: "prompt" }] },
@@ -128,6 +125,7 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
     socketPath: path.join(root, "host.sock"), sessionFile: path.join(root, "main.jsonl"),
     cwd, extensionPath: fixturePath, logPath: path.join(root, "native.log"),
     env: {
+      OMP_TEST_HOST_FIXTURE_ROOT: root,
       PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, USERPROFILE: home,
       PI_CODING_AGENT_DIR: agentDirectory, PI_NO_TITLE: "1", CI: "true", NO_COLOR: "1",
       OMP_SUPERAGENT_ROLE: "lane",
@@ -140,12 +138,10 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
     managedUlwPath: path.resolve(import.meta.dir, "fixtures/managed-ulw"),
     model: "socket-host-smoke/local", subagentConcurrency: 1,
   };
-  let child: { pid: number } | undefined;
-  let childExited = false;
   let succeeded = false;
   const connections = new Set<HostConnection>();
   try {
-    child = await startHost(options);
+    const child = await startHost(options);
     const first = await HostConnection.connect(options.socketPath);
     connections.add(first);
     const initial = await first.client.getState();
@@ -291,10 +287,11 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
 
     expect(await second.request({ type: "shutdown_host" })).toMatchObject({ success: true });
     await second.exited;
-    childExited = true;
     expect(JSON.parse(await fs.readFile(`${options.socketPath}.exit.json`, "utf8"))).toMatchObject({
-      pid: child.pid, sessionId: initial.sessionId, code: 0, signal: null, persisted: true, observationsFlushed: true,
+      pid: child.pid, ownerPid: initial.adapterOwnerPid, sessionId: initial.sessionId,
+      code: 0, signal: null, persisted: true, observationsFlushed: true,
     });
+    await waitForFixtureProcessExit([child.pid, initial.adapterOwnerPid]);
     expect((await fs.stat(options.sessionFile)).size).toBeGreaterThan(0);
     const entries = parseSessionEntries(await fs.readFile(options.sessionFile, "utf8"));
     expect(entries[0]).toMatchObject({ type: "session", id: initial.sessionId });
@@ -304,7 +301,7 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
       .map(entry => (entry as { data: FixtureRecord }).data);
     expect(records.map(record => record.phase)).toEqual(["checkpoint", "answer", "checkpoint", "shutdown"]);
     expect(records.filter(record => record.phase === "answer")).toEqual([expect.objectContaining({ confirmed: true, token: "original-approval-token" })]);
-    expect(records.every(record => record.sessionId === initial.sessionId && record.pid === child!.pid && record.networkAttempts === 0)).toBe(true);
+    expect(records.every(record => record.sessionId === initial.sessionId && record.pid === child.pid && record.networkAttempts === 0)).toBe(true);
     expect(records.filter(record => record.phase !== "shutdown").every(record => record.agentStarts === 0)).toBe(true);
     expect(records.find(record => record.phase === "shutdown")!.agentStarts).toBeGreaterThan(0);
     const decisionResults = entries.filter(entry => entry.type === "message" && entry.message.role === "toolResult"
@@ -343,8 +340,11 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
     const tail = await fs.readFile(options.logPath, "utf8").then(text => text.slice(-16_384), () => "<native log unavailable>");
     throw new Error(`${cause instanceof Error ? cause.message : String(cause)}\nNative artifacts retained: ${root}\nNative log tail:\n${tail}`, { cause });
   } finally {
-    for (const connection of connections) await connection.close();
-    if (child?.pid && !childExited) { try { process.kill(child.pid, "SIGKILL"); } catch {} }
+    try { for (const connection of connections) await connection.close(); }
+    finally {
+      if (await stopHostFixtures(root) !== 3 && succeeded)
+        throw new Error(`Expected main, foreign and rejected legacy Host identities; retained ${root}`);
+    }
     if (succeeded) await fs.rm(root, { recursive: true, force: true });
   }
 }, 90_000);

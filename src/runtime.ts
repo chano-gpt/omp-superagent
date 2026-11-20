@@ -1111,12 +1111,18 @@ export class Superagent {
         runtimeState: live.busy ? "running" : "idle",
       });
       if (recovery && live.input) {
+        const owner = live.input;
+        const cursor = live.observationCursor === undefined ? recovery.entryId : live.observationCursor;
         live.preparing++;
         try {
-          const entries = successful(await connection.request({ type: "get_entries" }), "recover native lane observations").entries;
-          if (!this.current(live) || this.stopped) throw new Error("Native observation recovery owner changed");
+          const entries = await this.readLaneObservationEntries(live, cursor, "recover native lane observations");
+          if (!this.current(live) || live.input !== owner || this.stopped) throw new Error("Native observation recovery owner changed");
           if (!Array.isArray(entries)) throw new Error("Native observation recovery journal is unavailable");
-          this.recoverLaneObservations(live, entries);
+          if (cursor !== undefined) {
+            // An empty suffix still confirms the checkpoint for buffered events.
+            live.observationCursor = cursor;
+            this.applyLaneObservations(live, entries);
+          }
         } finally { live.preparing--; }
       }
       observing = true;
@@ -2838,15 +2844,19 @@ export class Superagent {
     live.text = text;
   }
 
-  private recoverLaneObservations(live: Live, entries: unknown[]): void {
-    const recovery = live.recovery;
+  private async readLaneObservationEntries(live: Live, cursor: string | null | undefined, operation: string): Promise<unknown> {
+    const response = record(await live.connection.request(typeof cursor === "string"
+      ? { type: "get_entries", since: cursor } : { type: "get_entries" }));
+    if (response.success === false && response.code === "unknown_since")
+      throw new Error("Native observation journal cursor is unavailable");
+    return successful(response, operation).entries;
+  }
+
+  private applyLaneObservations(live: Live, entries: readonly unknown[]): void {
     if (!live.input || live.id === "main") return;
-    const journal = entries.map(record);
-    const start = live.observationCursor === undefined ? recovery?.entryId : live.observationCursor;
-    if (start === undefined) return;
-    const cursor = start === null ? -1 : journal.findIndex(entry => entry.id === start);
-    if (start !== null && cursor < 0) throw new Error("Native observation journal cursor is unavailable");
-    for (const entry of journal.slice(cursor + 1)) {
+    // Native `since` already excluded the old cursor. Replay in append order.
+    for (const value of entries) {
+      const entry = record(value);
       if (entry.type === "custom" && entry.customType === "superagent-lane-report") {
         const event = parseLaneReportResult({ details: entry.data });
         const at = Date.parse(String(entry.timestamp));
@@ -2861,7 +2871,8 @@ export class Superagent {
       if (message.role !== "toolResult") continue;
       this.observeLaneToolResult(live, message, true);
     }
-    const last = journal.at(-1)?.id;
+    // The active branch leaf may differ from the last appended entry.
+    const last = record(entries.at(-1)).id;
     if (typeof last === "string") live.observationCursor = last;
   }
 
@@ -2870,10 +2881,10 @@ export class Superagent {
     if (live.id === "main" || !owner || live.observationCursor === undefined || !this.current(live) || this.stopped) return;
     const read = async () => {
       if (!this.current(live) || live.input !== owner || this.stopped) return;
-      const entries = successful(await live.connection.request({ type: "get_entries" }), "read native lane observations").entries;
+      const entries = await this.readLaneObservationEntries(live, live.observationCursor, "read native lane observations");
       if (!this.current(live) || live.input !== owner || this.stopped) return;
       if (!Array.isArray(entries)) throw new Error("Native lane observation journal is unavailable");
-      this.recoverLaneObservations(live, entries);
+      this.applyLaneObservations(live, entries);
       // Process the completed boundary after its preceding native custom entries:
       // eval's hidden receipts must not overwrite a newer direct report.
       this.observeLaneToolResult(live, message);

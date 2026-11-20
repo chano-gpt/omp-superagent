@@ -6,10 +6,12 @@ import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-l
 import { loadConfig } from "../../src/config";
 import { createGatewayMessenger } from "../../src/gateway-client";
 import { Store } from "../../src/store";
+import { recordHostFixture } from "./host-fixture-processes";
 import { stockHostFixture } from "./stock-host";
 
 const arg = (name: string) => process.argv[process.argv.indexOf(name) + 1]!;
 const config = await loadConfig(process.env.OMP_SUPERAGENT_CONFIG!);
+recordHostFixture(config.stateDir);
 const sessionFile = arg("--session");
 const sessionId = await readSessionHeaderId(sessionFile);
 if (!sessionId) throw new Error("Lifecycle peer requires the actual materialized native header");

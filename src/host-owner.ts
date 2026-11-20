@@ -29,7 +29,6 @@ type HostChannel = import("./host-protocol").HostChannel;
 const { SessionManager } = await import("@oh-my-pi/pi-coding-agent/session/session-manager");
 const { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES } = await import("@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame");
 const { parseSessionEntries } = await import("@oh-my-pi/pi-coding-agent/session/session-loader");
-const { fitAbortAndRestoreQueueResponse } = await import("@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode");
 if (!await fs.stat(options.sessionFile).then(() => true, error => {
   if (error.code === "ENOENT") return false;
   throw error;
@@ -263,6 +262,10 @@ const handle = async (command: Frame, peer: HostChannel) => {
       if (observationFailure) throw new Error("Durable native observations are unavailable");
     }
     const nativeId = crypto.randomUUID();
+    // Only queue restoration needs the full RPC-mode module. Load it before
+    // the interrupt withdraws any input, not after that effect has happened.
+    const fitRestoredQueue = command.type === "abort_and_restore_queue"
+      ? (await import("@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode")).fitAbortAndRestoreQueueResponse : undefined;
     let restored: RpcAbortAndRestoreQueueResult | undefined;
     if (interrupt) {
       // Establish the native abort barrier and withdraw already-admitted input
@@ -282,7 +285,7 @@ const handle = async (command: Frame, peer: HostChannel) => {
     const completion = native.request({ ...command, id: undefined }, nativeId,
       command.type === "compact" ? 0 : 30_000);
     let result = await completion;
-    if (result.success && restored) {
+    if (result.success && restored && fitRestoredQueue) {
       // The original RPC still stops its builtin/goal controllers and supplies
       // its receipt. Keep any input it withdrew too, in native queue order.
       const remaining = result.data as RpcAbortAndRestoreQueueResult;
@@ -290,7 +293,7 @@ const handle = async (command: Frame, peer: HostChannel) => {
         ...(restored.imagesDropped || remaining.imagesDropped ? { imagesDropped: true as const } : {}),
         ...(restored.truncated || remaining.truncated ? { truncated: true as const } : {}),
       };
-      result = fitAbortAndRestoreQueueResponse(originalId, {
+      result = fitRestoredQueue(originalId, {
         ...restored, ...remaining,
         steering: [...restored.steering, ...remaining.steering],
         followUp: [...restored.followUp, ...remaining.followUp],

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { stopHostFixtures } from "./fixtures/host-fixture-processes";
 
 // Both native execution and this exact external package are explicit opt-ins.
 // Never silently substitute a mock ULW extension or a developer checkout path.
@@ -27,6 +28,7 @@ nativeUlwTest("actual shared ULW activates native Gateway head and explicitly se
       cmd: [process.execPath, path.resolve(import.meta.dir, "fixtures/native-gateway.ts")],
       cwd: root,
       env: {
+        OMP_TEST_HOST_FIXTURE_ROOT: root,
         PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, USERPROFILE: home,
         PI_CODING_AGENT_DIR: path.join(root, "agent"), PI_NO_TITLE: "1", CI: "true", NO_COLOR: "1",
         XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"),
@@ -55,7 +57,11 @@ nativeUlwTest("actual shared ULW activates native Gateway head and explicitly se
     expect(stdout).toContain("NATIVE_ULW_GATEWAY_PROOF ");
     succeeded = true;
   } finally {
-    await terminate?.();
+    try { await terminate?.(); }
+    finally {
+      if (await stopHostFixtures(root, path.join(root, "run")) !== 2 && succeeded)
+        throw new Error(`Expected head and lane Host identities; retained ${root}`);
+    }
     if (succeeded) await fs.rm(root, { recursive: true, force: true });
   }
 }, 270_000);

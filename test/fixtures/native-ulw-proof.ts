@@ -7,6 +7,7 @@ import { hostPaths, type Config } from "../../src/config";
 import type { Inbound, InputRecord, Lane, Messenger, OutputRecord, Route } from "../../src/contracts";
 import { HostConnection } from "../../src/host";
 import type { GatewayService } from "../../src/gateway";
+import { waitForFixtureProcessExit } from "./host-fixture-processes";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 
 type Evidence = { role: string; requestId: string; policyCount: number; sessionId: string; notices: string[]; directives: string[]; activeTools: string[] };
@@ -89,7 +90,8 @@ export async function runNativeUlwProof(options: {
   assert.equal(lane.cwd, path.join(root, "topic"));
   assert.notEqual(lane.sessionId, headState.sessionId);
   const actualLane = await connect(lane.socketPath);
-  assert.equal((await actualLane.client.getState()).goal, null);
+  const laneState = await actualLane.client.getState();
+  assert.equal(laneState.goal, null);
   const firstHandoff = "handoff:303:lane";
   const secondHandoff = `handoff:307:${lane.id}`;
   const bulkHandoff = `handoff:308:${lane.id}`;
@@ -199,8 +201,9 @@ export async function runNativeUlwProof(options: {
   await head.exited;
   assert.equal((await actualLane.client.getState()).isSettled, true);
   assert.equal((await actualLane.client.getState()).hasOwnedRunningWork, false);
-  await actualLane.request({ type: "shutdown_host" });
+  assert.equal((await actualLane.request({ type: "shutdown_host" })).success, true);
   await actualLane.exited;
+  await waitForFixtureProcessExit([headState.hostPid, headState.adapterOwnerPid, lane.pid, laneState.adapterOwnerPid]);
   for (const sessionFile of [main.sessionFile, lane.sessionFile]) {
     const entries = parseSessionEntries(await fs.readFile(sessionFile, "utf8"));
     const shutdowns = entries.flatMap(entry => entry.type === "custom" && entry.customType === "omp-superagent-native-test" ? [entry.data as { networkAttempts: number }] : []);

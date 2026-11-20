@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { registerDecisionAsk } from "../../src/decision-tool";
+import { recordHostFixture } from "./host-fixture-processes";
 
 const RECORD_TYPE = "omp-superagent-native-test";
 
@@ -12,6 +13,8 @@ export const nativeDisabledProviders = [...new Set([
 
 /** Offline native RPC fixture; all provider responses and network attempts are observable. */
 export default function nativeFixture(pi: ExtensionAPI): void {
+  const fixtureRoot = process.env.OMP_TEST_HOST_FIXTURE_ROOT;
+  if (fixtureRoot) recordHostFixture(fixtureRoot);
   registerDecisionAsk(pi);
   let serviceRequested = false;
   const mock = createMockModel({ provider: "socket-host-smoke", id: "local",

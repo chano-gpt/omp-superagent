@@ -42,8 +42,11 @@ The [`lane_report` tool](../../src/lane-extension.ts) records evidence in the
 native journal. It hashes selected file bytes or successful tool results. Duplicate
 content and repeated waits do not refresh evidence timestamps; ordinary
 commentary is not verification. Resolve only the exact tool/approval/job or
-dependency wait. The runtime recovers records from a source-bound journal
-cursor and exposes observation timestamps and `ownerCurrent`, not a guarantee
+dependency wait. Lane observation reads request only the entries appended
+after the source-bound journal cursor (`get_entries` with `since`). A missing
+cursor fails the observation rather than replaying another request's history.
+Ownership and outcome checks that need the full journal still read it. The
+runtime exposes observation timestamps and `ownerCurrent`, not a guarantee
 that a reported dependency is still live. Native children cannot use the
 manager, report as the lane, or access the board.
 
@@ -68,6 +71,10 @@ journal persistence. An enabled native goal, including a paused one, can prevent
 shutdown. Do not infer eligibility from `agent_end`, an RPC disconnect, a saved
 file, or a lease alone. Release ownership and the slot only after actual native
 exit; a shutdown ACK is not exit. Reload the same native session when authorized.
+
+The stdio owner uses the stock RPC frame codec for ordinary traffic. It loads
+the larger stock RPC-mode module only when an `abort_and_restore_queue` request
+needs its bounded response builder, before withdrawing any queued input.
 
 The [Host extension](../../src/host-extension.ts) uses the exact registered
 `AgentSession` and native persistence/lifecycle guards. Use native `wakeSources`

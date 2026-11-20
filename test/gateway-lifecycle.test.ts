@@ -19,6 +19,7 @@ import {
   cleanups, configFixture, detachedFixture, fixture, LIFECYCLE_PHASE_MS, metadata,
   route, RPC_MS, STARTUP_MS, token, until, waitStatus, withFixtureToken,
 } from "./fixtures/gateway-lifecycle";
+import { waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 
 const RESTART_SHUTDOWN_MS = 2 * LIFECYCLE_PHASE_MS + RPC_MS; // runner preparation, shutdown RPC, then owner exit
 
@@ -28,7 +29,7 @@ afterEach(async () => {
     try { await cleanup(); } catch (error) { failures.push(error); }
   }
   if (failures.length) throw new AggregateError(failures, "Gateway lifecycle fixture cleanup failed");
-}, { timeout: STARTUP_MS + RPC_MS + 2 * LIFECYCLE_PHASE_MS });
+}, { timeout: STARTUP_MS + RPC_MS + 3 * LIFECYCLE_PHASE_MS });
 
 const input = (id: string, text = id): Inbound => ({ id, route, messageId: id, text, receivedAt: Date.now(), attachments: [] });
 const restartRecord = (root: string, requestId: string) => metadata<GatewayRestartRecord>(root, `gateway:restart:${requestId}`);
@@ -82,6 +83,9 @@ test("a busy owned HEAD refuses shutdown, and explicit stop cancels an accepted 
   expect(initial!.args).not.toContain("--rpc-socket");
   const sessionFile = hostPaths(f.config, "main").sessionFile;
   const head = { pid, sessionFile, sessionId: await sessionId(sessionFile) };
+  const owned = metadata<RestartPlan["head"]>(f.root, "gateway:head");
+  if (!owned) throw new Error("Gateway did not save the launched Host identity");
+  expect(owned).toMatchObject(head);
   expect(f.service.status().head.initialization).toMatchObject({ sessionId: head.sessionId, state: "complete" });
 
   await writeFile(join(f.root, "busy"), "busy");
@@ -118,6 +122,7 @@ test("a busy owned HEAD refuses shutdown, and explicit stop cancels an accepted 
   f.service.runRestart(current.requestId);
   expect(restartRecord(f.root, current.requestId)).toMatchObject({ state: "refused", reason: expect.stringContaining("operator stop") });
   expect(processAlive(pid)).toBe(false);
+  await waitForFixtureProcessExit([owned.ownerPid]);
   expect(f.stopped).toBe(true);
   expect(existsSync(gatewayPaths(f.config).socketPath)).toBe(false);
   expect(await launches(f.root)).toHaveLength(1);
@@ -219,9 +224,10 @@ test("Gateway waits for the recorded adapter owner even after its native process
 
 test("restart execution distinguishes spawn failure, native refusal and ambiguous native shutdown without replacement", async () => {
   let spawnFails = true;
+  let closing = false;
   const liveRunners = new Set<ChildProcess>();
   const f = await fixture({ launchRestartRunner(path, requestId, fd) {
-    if (spawnFails) return spawn("/nonexistent/omp-superagent-restart-runner", [], { stdio: "ignore" });
+    if (spawnFails || closing) return spawn("/nonexistent/omp-superagent-restart-runner", [], { stdio: "ignore" });
     const runner = spawn(process.execPath, ["--no-env-file", fileURLToPath(new URL("../src/gateway-restart.ts", import.meta.url)),
       "--config", path, "--state-dir", dirname(path), "--request", requestId], { cwd: dirname(path), stdio: ["ignore", fd, fd] });
     liveRunners.add(runner);
@@ -230,6 +236,7 @@ test("restart execution distinguishes spawn failure, native refusal and ambiguou
     return runner;
   } });
   cleanups.push(async () => {
+    closing = true;
     for (const runner of liveRunners) runner.kill();
     await until("fixture runner cleanup", 5_000, () => liveRunners.size === 0);
   });

@@ -128,7 +128,12 @@ class HostTransport implements RuntimeHost {
     if (command.type === "get_entries") {
       if (this.beforeEntries) await this.beforeEntries();
       const leaf = this.journalLeaf ? (this.entries.at(-1) as { id?: string } | undefined)?.id ?? null : null;
-      const response = { success: true, data: { entries: structuredClone(this.entries), leafId: leaf } };
+      const since = command.since;
+      const index = typeof since === "string" ? this.entries.findIndex(entry =>
+        entry !== null && typeof entry === "object" && "id" in entry && entry.id === since) : -1;
+      const response = since !== undefined && index < 0
+        ? { success: false, code: "unknown_since", error: "Unknown entries cursor" }
+        : { success: true, data: { entries: structuredClone(this.entries.slice(index + 1)), leafId: leaf } };
       const after = this.afterEntries?.();
       if (after) await after;
       return response;
@@ -1181,7 +1186,7 @@ describe("event-driven nonterminal progress", () => {
     expect(store.lane(lane.id)?.workState).toBe("open");
   });
 
-  test("native eval reports arrive through their source-bound journal, not printed receipt text", async () => {
+  test("native eval reports use exclusive append-order journal suffixes, not printed receipt text", async () => {
     const { runtime, config, store, hosts, errors } = fixture();
     const lane = savedLane(store, config, "eval-observation", route("work-topic"));
     await runtime.start();
@@ -1206,6 +1211,19 @@ describe("event-driven nonterminal progress", () => {
     worker.emit({ type: "message_end", message: { role: "toolResult", toolName: "eval", toolCallId: "next-eval", timestamp: 4000 } });
     await runtime.kick();
     expect(store.lane(lane.id)?.observation).toMatchObject({ waiting: { since: 1000 }, lastReportAt: 3000 });
+    worker.entries.push(
+      { id: "first-appended", type: "custom", customType: "superagent-lane-report",
+        timestamp: new Date(4500).toISOString(), data: { ...event, reportId: "first-appended",
+          report: { ...report, waiting: { kind: "dependency", target: "First appended target" } } } },
+      { id: "last-appended", type: "custom", customType: "superagent-lane-report",
+        timestamp: new Date(4100).toISOString(), data: { ...event, reportId: "last-appended",
+          report: { ...report, waiting: { kind: "dependency", target: "Last appended target" } } } },
+    );
+    worker.emit({ type: "message_end", message: { role: "toolResult", toolName: "eval", toolCallId: "append-order", timestamp: 4700 } });
+    await runtime.kick();
+    expect(store.lane(lane.id)?.observation).toMatchObject({
+      waiting: { since: 4100, target: { kind: "dependency", target: "Last appended target" } }, lastReportAt: 4100,
+    });
     worker.entries.push({ id: "earlier-hidden-report", type: "custom", customType: "superagent-lane-report",
       timestamp: new Date(5000).toISOString(), data: { ...event, reportId: "earlier-hidden",
         report: { ...report, waiting: { kind: "dependency", target: "Earlier hidden target" } } } });
@@ -1215,8 +1233,39 @@ describe("event-driven nonterminal progress", () => {
     expect(store.lane(lane.id)?.observation).toMatchObject({
       waiting: { since: 6000, target: { kind: "dependency", target: "Latest direct target" } }, lastReportAt: 6000,
     });
+    expect(worker.commands.filter(command => command.type === "get_entries").map(command => command.since)).toEqual([
+      undefined, undefined, undefined, "native-eval-receipt", "native-eval-duplicate", "last-appended",
+    ]);
     expect(worker.prompts).toHaveLength(1);
     expect(errors).toEqual([]);
+  });
+
+  test("a missing native lane observation cursor blocks both journal and direct reports", async () => {
+    const { runtime, config, store, hosts, errors } = fixture();
+    const lane = savedLane(store, config, "missing-observation-cursor", route("work-topic"));
+    await runtime.start();
+    await admit(runtime, message("missing-observation-head", route("other-topic")));
+    await delegate(runtime, message("missing-observation-source", lane.route));
+    const worker = hosts.get(lane.socketPath);
+    if (!worker) throw new Error("Missing native lane owner");
+    const report = (id: string, target: string, timestamp: number) => ({
+      role: "toolResult", toolName: "lane_report", toolCallId: id, timestamp,
+      details: { type: "superagent-lane-report", sessionId: worker.state.sessionId, reportId: id,
+        report: { status: "waiting", summary: "Waiting for native evidence", waiting: { kind: "dependency", target }, evidence: [] } },
+    });
+    worker.entries.push({ id: "original-cursor", type: "message", message: report("original", "Original target", 1000) });
+    worker.emit({ type: "message_end", message: report("original", "Original target", 1000) });
+    await runtime.kick();
+    const before = store.lane(lane.id)?.observation;
+    expect(before?.waiting).toMatchObject({ since: 1000, target: { kind: "dependency", target: "Original target" } });
+
+    worker.entries = [{ id: "unanchored-entry", type: "message", message: report("unanchored", "Unanchored journal target", 2000) }];
+    worker.emit({ type: "message_end", message: report("direct", "Unanchored direct target", 3000) });
+    await runtime.kick();
+    expect(store.lane(lane.id)?.observation).toEqual(before);
+    expect(worker.commands.filter(command => command.type === "get_entries").map(command => command.since))
+      .toEqual([undefined, undefined, "original-cursor"]);
+    expect(errors.map(error => error instanceof Error ? error.message : error)).toEqual(["Native observation journal cursor is unavailable"]);
   });
 
   test("structured report identity/role rejection and pause fences preserve the last recorded observation", async () => {
@@ -2438,7 +2487,13 @@ describe("controlled Gateway AND HEAD restart", () => {
     expect(instance.main.prompts).toEqual([]);
   });
 
-  test.each(["journal", "buffered", "eval-journal"] as const)("restart restores source-bound lane observations in %s order without resetting clocks or replaying work", async timing => {
+  test.each([
+    ["journal", ["observation-cursor", undefined]],
+    ["buffered", ["observation-cursor", "journal-wait", undefined]],
+    ["buffered-at-checkpoint", ["observation-cursor", "observation-cursor", undefined]],
+    ["eval-journal", ["observation-source-start", undefined]],
+    ["empty-origin", [undefined, undefined]],
+  ] as const)("restart restores source-bound lane observations in %s order without resetting clocks or replaying work", async (timing, readCursors) => {
     const instance = restartFixture();
     const { store, config, hosts, main, runtime } = instance;
     const lane = savedLane(store, config, "observation-recovery", route("observation-topic"), process.pid);
@@ -2471,33 +2526,37 @@ describe("controlled Gateway AND HEAD restart", () => {
       { id: "observation-cursor", type: "custom", customType: "checkpoint" },
       { type: "message", id: "journal-wait", message: originalWait },
     ];
-    if (timing === "eval-journal") {
+    if (timing === "eval-journal" || timing === "empty-origin") {
+      const start = { id: "observation-source-start", type: "custom", customType: "source-start" };
       native.entries = [
-        native.entries[0],
-        { id: "observation-source-start", type: "custom", customType: "source-start" },
+        ...(timing === "eval-journal" ? [native.entries[0], start] : []),
         { id: "native-eval-report", type: "custom", customType: "superagent-lane-report",
           timestamp: new Date(1000).toISOString(), data: originalWait.details },
         { id: "observation-cursor", type: "custom", customType: "checkpoint" },
       ];
       store.setMeta(`lane-observation-owner:${original.id}`, JSON.stringify({
         sessionId: native.state.sessionId, sessionFile: lane.sessionFile, generation: lane.generation,
-        requestId: "observation-request", cursor: "observation-source-start",
+        requestId: "observation-request", cursor: timing === "eval-journal" ? start.id : null,
       }));
     }
-    if (timing === "buffered") native.afterEntries = () => {
+    if (timing === "buffered-at-checkpoint") native.entries.pop();
+    const buffered = timing === "buffered" || timing === "buffered-at-checkpoint";
+    const newer = toolResult("buffered-wait", "newer-dependency", 2000);
+    if (buffered) native.afterEntries = () => {
       native.afterEntries = undefined;
-      const newer = toolResult("buffered-wait", "newer-dependency", 2000);
       native.entries.push({ type: "message", id: "buffered-wait", message: newer });
       native.emit({ type: "message_end", message: newer });
     };
     await runtime.start();
     await runtime.kick();
-    const expected = timing === "buffered" ? { target: "newer-dependency", since: 2000 } : { target: "original-dependency", since: 1000 };
+    const reads = native.commands.filter(command => command.type === "get_entries");
+    expect(reads.map(command => command.since)).toEqual([...readCursors]);
+    const expected = buffered ? { target: "newer-dependency", since: 2000 } : { target: "original-dependency", since: 1000 };
     expect(store.lane(lane.id)?.observation).toMatchObject({
       inputId: original.id, requestId: "observation-request", sessionId: native.state.sessionId, lastEvidenceAt: null,
       waiting: { target: { kind: "dependency", target: expected.target }, since: expected.since },
     });
-    native.emit({ type: "message_end", message: originalWait });
+    native.emit({ type: "message_end", message: timing === "buffered-at-checkpoint" ? newer : originalWait });
     await runtime.kick();
     expect(store.lane(lane.id)?.observation?.waiting?.since).toBe(expected.since);
     expect(await runtime.inspect(lane.id)).toMatchObject({ observationState: { ownerCurrent: true } });
