@@ -114,7 +114,7 @@ service or an OS sandbox; see [Design](DESIGN.md).
 
 Install from [npm](https://www.npmjs.com/package/omp-superagent) or use the source
 and npm tarballs from the
-[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.3).
+[GitHub Release](https://github.com/dbc-hbin/omp-superagent/releases/tag/v0.1.4).
 Install with Bun or npm below. Bun is still required at runtime; this is not a
 standalone binary. Installation prepares the managed dependencies. Running a Host
 requires a separately installed OMP; this project neither patches nor builds it.
@@ -157,7 +157,7 @@ To install OMP separately, see the
 [upstream instructions](https://github.com/can1357/oh-my-pi#install).
 
 ```sh
-bun add --global --trust omp-superagent@0.1.3
+bun add --global --trust omp-superagent@0.1.4
 omp-sa --help
 ```
 
@@ -170,7 +170,7 @@ Ensure `bun pm bin --global` is on `PATH`.
 Alternatively, with Bun on `PATH`:
 
 ```sh
-npm install --global omp-superagent@0.1.3
+npm install --global omp-superagent@0.1.4
 ```
 
 Keep lifecycle scripts enabled for the managed ULW integration.
@@ -186,7 +186,7 @@ The CLI command is **`omp-sa`**; the package name is `omp-superagent`.
 <details>
 <summary><strong>Run from a source checkout</strong></summary>
 
-For a source checkout or extracted source tarball, run from its root instead:
+For a source checkout or source tarball, install stable Rust/Cargo, CMake and a C compiler first. Cargo builds the Gateway and Host relay, not OMP. Run `bun run build:native` after changing their Rust code. From the project root:
 
 ```sh
 bun install --frozen-lockfile
@@ -332,7 +332,7 @@ recorded versions and scenarios. Offline CI does not verify live accounts or pro
 | [Execution and coordination](docs/design/execution.md) | lanes, native Host lifecycle, models, workflows, managed integration, monitoring, and the board. |
 | [Operations guide](docs/OPERATIONS.md) | platform setup, commands, and recovery. |
 | [Voice configuration guide](docs/discord-voice.md) | Codex subscription voice or the separately billed API. |
-| Releases | [Release notes](docs/releases/0.1.3.md) and [historical verification records](docs/releases/0.1.0.md#verification-records). |
+| Releases | [Release notes](docs/releases/0.1.4.md) and [historical verification records](docs/releases/0.1.0.md#verification-records). |
 
 Built on [oh-my-pi](https://github.com/can1357/oh-my-pi), with
 [omp-superkit](https://github.com/dbc-hbin/omp-superkit) workflow integration.
