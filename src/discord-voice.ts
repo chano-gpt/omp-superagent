@@ -24,6 +24,7 @@ export class DiscordVoice {
   private shareUntil = 0;
   private lastCommand = 0n;
   private lastWorkOff = 0n;
+  private lastDraftStart = 0n;
   private readonly startedAt = Date.now();
 
   constructor(private readonly config: DiscordVoiceConfig, private readonly owner: string,
@@ -46,9 +47,26 @@ export class DiscordVoice {
     // Work-off revokes earlier permissions and confirmations, but must not
     // discard an ordinary conversation start still queued behind text intake.
     if (sequence <= this.lastCommand || (control !== "/voice start" && sequence <= this.lastWorkOff)) return null;
+    const startWithDrafts = control === "/voice start work" || control === "/voice start share";
+    const start = control === "/voice start" || startWithDrafts;
+    const channel = message.channel;
+    if (startWithDrafts) {
+      // A refused priority start is still one-shot, but cannot advance the
+      // watermark of an earlier, valid confirmation in the ordinary queue.
+      if (sequence <= this.lastDraftStart) return null;
+      this.lastDraftStart = sequence;
+    }
+    if (start && this.session) {
+      if (!startWithDrafts) this.lastCommand = sequence;
+      this.notice(channel, "A voice session is already starting or active.");
+      return null;
+    }
+    if (control === "/voice start share" && this.config.auth !== "subscription") {
+      this.notice(channel, "/voice start share is only available in subscription mode. Use /voice start work for API voice drafts.");
+      return null;
+    }
     if (control === "/voice work off") this.lastWorkOff = sequence;
     else this.lastCommand = sequence;
-    const channel = message.channel;
     if (control === "/voice confirm") {
       const work = this.drafts.consume(message);
       if (!work) this.notice(channel, "No matching active voice draft. Reply to the current draft, or write the request directly.");
@@ -60,13 +78,9 @@ export class DiscordVoice {
     } else if (control === "/voice work off") {
       this.revokeWork();
       this.notice(channel, "Voice work drafts are off. Unconfirmed drafts can no longer be submitted.");
-    } else if (control === "/voice start" || control === "/voice start work" ||
-      (control === "/voice start share" && this.config.auth === "subscription")) {
-      if (this.session) this.notice(channel, "A voice session is already starting or active.");
-      else {
-        const permission = control === "/voice start work" ? "call" : control === "/voice start share" ? "one" : "off";
-        void this.start(channel, permission).catch(() => this.report(new Error("Discord voice startup failed")));
-      }
+    } else if (start) {
+      const permission = control === "/voice start work" ? "call" : control === "/voice start share" ? "one" : "off";
+      void this.start(channel, permission).catch(() => this.report(new Error("Discord voice startup failed")));
     } else this.notice(channel, this.config.auth === "subscription"
       ? "Use /voice start for conversation, /voice start work for work drafts, or /voice start share for one draft. Use /voice work off or /voice stop to revoke."
       : "Use /voice start for conversation or /voice start work for work drafts. Use /voice work off or /voice stop to revoke. Voice uses paid OpenAI Live audio.");

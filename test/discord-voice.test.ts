@@ -116,7 +116,12 @@ test.each(["api", "subscription", "subscription rejected"] as const)("%s: explic
     const confirmed = latestDraft();
     expect(confirmed.content).toContain("Inspect the failed check");
     expect(voice.command(message("/voice confirm"))).toBeNull();
-    expect(voice.command(message("/voice confirm", confirmed.id))).toContain("Inspect the failed check");
+    const queuedConfirmation = message("/voice confirm", confirmed.id);
+    // The priority controls can arrive while ordinary Discord intake is waiting.
+    voice.command(message("/voice start work"));
+    voice.command(message("/voice start share"));
+    expect(voice.command(queuedConfirmation)).toContain("Inspect the failed check");
+    expect(voice.command(queuedConfirmation)).toBeNull();
 
     await live.forward("Open the current test report");
     const revoked = latestDraft();
