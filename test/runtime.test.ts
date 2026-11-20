@@ -686,6 +686,33 @@ describe("source-bound Discord topic management", () => {
     return { lane, source, edits, current: () => current };
   }
 
+  test("pausing a work thread clears its marker even when the working edit lands late", async () => {
+    const instance = fixture();
+    const { runtime, messenger } = instance;
+    const f = managedThread(instance);
+    const apply = messenger.updateThread;
+    if (!apply) throw new Error("Missing fixture thread editor");
+    const working = Promise.withResolvers<void>();
+    const allowWorkingEdit = Promise.withResolvers<void>();
+    const cleared = Promise.withResolvers<ThreadInfo>();
+    messenger.updateThread = async (destination, changes) => {
+      if (changes.title === "⏳ Original") {
+        working.resolve();
+        await allowWorkingEdit.promise;
+      }
+      const thread = await apply(destination, changes);
+      if (thread.title === "Original") cleared.resolve(thread);
+      return thread;
+    };
+    await runtime.start();
+    try {
+      await delegate(runtime, message("run-before-pause", f.lane.route));
+      await working.promise;
+      await runtime.pause(f.lane.id);
+    } finally { allowWorkingEdit.resolve(); }
+    expect(await cleared.promise).toMatchObject({ route: f.lane.route, title: "Original", archived: false, appliedTags: ["101"] });
+  });
+
   test("rename, retag, archive and reopen leave lane lifecycle intact and old receipts cannot overwrite newer edits", async () => {
     const instance = fixture();
     const { runtime, store } = instance;

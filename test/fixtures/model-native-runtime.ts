@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { parseSessionEntries, type FileEntry, type SessionHeader } from "@oh-my-pi/pi-coding-agent";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type Config, hostPaths, privateDirectory } from "../../src/config";
-import type { Approval, Inbound, Lane, LanePresetSnapshot, Messenger, OutputRecord, Route } from "../../src/contracts";
+import { physicalRouteKey, type Approval, type Inbound, type Lane, type LanePresetSnapshot, type Messenger, type OutputRecord,
+  type Route, type ThreadInfo, type ThreadUpdate } from "../../src/contracts";
 import { buildHostArgs, HostConnection, startHost, type HostOptions } from "../../src/host";
 import { Superagent } from "../../src/runtime";
 import { readOmpUsage } from "../../src/omp-usage";
@@ -26,6 +27,7 @@ type Handlers = Parameters<Messenger["start"]>[0];
 class RecordingMessenger implements Messenger {
   readonly sent: OutputRecord[] = [];
   handlers?: Handlers;
+  thread?: ThreadInfo;
   async start(handlers: Handlers): Promise<void> { this.handlers = handlers; }
   async deliver(input: Inbound): Promise<void> {
     if (!this.handlers) throw new Error("Messenger has not started");
@@ -43,6 +45,14 @@ class RecordingMessenger implements Messenger {
   async showApproval(_approval: Approval): Promise<string> { throw new Error("Unexpected native dialog"); }
   async dismissApproval(_approval: Approval): Promise<void> { throw new Error("Unexpected native dialog dismissal"); }
   async createThread(_route: Route, _title: string): Promise<Route> { throw new Error("The independent thread already exists"); }
+  async inspectThread(route: Route): Promise<ThreadInfo> {
+    if (!this.thread || physicalRouteKey(this.thread.route) !== physicalRouteKey(route)) throw new Error("Unexpected work thread");
+    return structuredClone(this.thread);
+  }
+  async updateThread(route: Route, changes: ThreadUpdate): Promise<ThreadInfo> {
+    this.thread = { ...await this.inspectThread(route), ...changes };
+    return structuredClone(this.thread);
+  }
   async fetchAfter(_route: Route, _messageId: string): Promise<Inbound[]> { return []; }
   async openAttachment(): Promise<Response> { throw new Error("Native fixture has no authorized attachments"); }
   async stop(): Promise<void> { this.handlers = undefined; }
@@ -251,6 +261,8 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
   const inbound = (id: string, destination: Route, text: string): Inbound => ({ id, messageId: id, route: destination, text, receivedAt: Date.now(), attachments: [] });
   const ordinary = inbound("101", route, "Answer this ordinary head request using the local fixture.");
   const threadRoute = { ...route, threadId: "50" };
+  messenger.thread = { route: threadRoute, title: "Independent topic", archived: false,
+    requiresTag: true, appliedTags: ["101"], availableTags: [{ id: "101", name: "Work", moderated: false }] };
   const topic = inbound("102", threadRoute, "Handle this independent topic in its own workspace.");
   const followup = inbound("103", threadRoute, "Continue this independent topic in the same native session.");
   const modelChangeSource = inbound("104", route, "Explicitly change the idle independent lane to the native low preset.");
@@ -344,7 +356,9 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       modelReason, acceptance: ["Reply only inside the original topic thread"] });
     expect(created.route).toEqual(threadRoute);
     expect(created.cwd).toBe(laneCwd);
+    await until(() => messenger.thread?.title === "⏳ Independent topic", "native lane run labels its Discord work thread");
     await until(() => delivered(report(firstHandoff)), "lane report returns to head before external answer");
+    expect(messenger.thread?.title).toBe("⏳ Independent topic");
     const firstLane = store.lane(created.id)!;
     expect(firstLane.sessionId).toBeTruthy();
     expect(firstLane.sessionId).not.toBe(headState.sessionId);
@@ -377,6 +391,8 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       expect(closingState).toMatchObject({ hostPid: firstLane.pid, sessionId: firstLane.sessionId });
       // Real native shutdown, not a disconnected controller or a simulated store transition.
       await runtime.closeLane(created.id, "completed", "Observed a settled native answer and durable thread receipt.");
+      await until(() => messenger.thread?.title === "✅ Independent topic", "verified lane closure labels its Discord work thread");
+      expect(messenger.thread).toMatchObject({ route: threadRoute, appliedTags: ["101"], archived: false });
       await within(closing.exited, 10_000, "Native persistence and adapter shutdown did not complete");
       await processExited(firstLane.pid!);
       await processExited(closingState.adapterOwnerPid);
@@ -417,6 +433,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
     expect(requestIds(parseSessionEntries(await fs.readFile(firstLane.sessionFile, "utf8")))).toEqual([firstHandoff]);
     const followupHandoff = `handoff:${followup.id}:${created.id}`;
     await runtime.messageLane(created.id, followup.text, followup.id);
+    if (modelSelection) await until(() => messenger.thread?.title === "⏳ Independent topic", "resumed work replaces the completed title marker");
     await until(() => delivered(report(followupHandoff)), "explicit follow-up report and head answer settlement");
     expectedDelivered.push({ ...followup, id: report(followupHandoff) });
     const finalLane = store.lane(created.id)!;

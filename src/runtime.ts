@@ -230,6 +230,7 @@ export class Superagent {
   private readonly tasks = new Set<Promise<unknown>>();
   private readonly activeReactions = new Map<string, string>();
   private readonly reactionQueues = new Map<string, Promise<void>>();
+  private readonly threadEditQueues = new Map<string, Promise<unknown>>();
   private priorityTail: Promise<void> = Promise.resolve();
   private headCompaction?: { id: string; cancelled: boolean };
   private headStopping = 0;
@@ -1995,7 +1996,8 @@ export class Superagent {
     this.authorized(source.route);
     const lane = this.requireLane(input.id);
     this.authorized(lane.route);
-    if (lane.route.platform !== "discord" || !lane.route.guildId || !lane.route.threadId || !this.messenger.updateThread)
+    const { messenger } = this;
+    if (lane.route.platform !== "discord" || !lane.route.guildId || !lane.route.threadId || !messenger.updateThread)
       throw new Error("Thread changes require a managed Discord guild thread");
     const changes = structuredClone(input.changes);
     const request = { route: physicalRoute(lane.route), changes };
@@ -2012,7 +2014,12 @@ export class Superagent {
     this.store.setMeta(receiptKey, JSON.stringify({ request }));
     this.laneMutations++;
     try {
-      const result = await this.messenger.updateThread(request.route, changes);
+      const updateThread = messenger.updateThread.bind(messenger);
+      const result = await this.editThreadInOrder(request.route, async () => {
+        if (this.stopped || this.restartFence())
+          throw new DeliveryError("Thread change was fenced before sending", "rejected");
+        return updateThread(request.route, changes);
+      });
       if (physicalRouteKey(result.route) !== physicalRouteKey(request.route))
         throw new DeliveryError("Thread update returned a different destination", "uncertain");
       this.store.setMeta(receiptKey, JSON.stringify({ request, result }));
@@ -2025,13 +2032,52 @@ export class Superagent {
     } finally { this.laneMutations--; }
   }
 
+  private async editThreadInOrder<T>(route: Route, edit: () => Promise<T>): Promise<T> {
+    const key = physicalRouteKey(route);
+    const previous = this.threadEditQueues.get(key);
+    const operation = previous ? previous.then(edit, edit) : edit();
+    this.threadEditQueues.set(key, operation);
+    try { return await operation; }
+    finally { if (this.threadEditQueues.get(key) === operation) this.threadEditQueues.delete(key); }
+  }
+
+  private async syncLaneThreadTitle(lane: Lane, state: Lane["workState"]): Promise<void> {
+    const { messenger } = this;
+    const route = physicalRoute(lane.route);
+    if (route.platform !== "discord" || !route.guildId || !route.threadId || !messenger.inspectThread || !messenger.updateThread) return;
+    const inspect = messenger.inspectThread.bind(messenger);
+    const update = messenger.updateThread.bind(messenger);
+    const current = () => !this.stopped && !this.restartFence() && this.store.lane(lane.id)?.workState === state;
+    await this.editThreadInOrder(route, async () => {
+      if (!current()) return;
+      this.authorized(route);
+      const thread = await inspect(route);
+      if (physicalRouteKey(thread.route) !== physicalRouteKey(route))
+        throw new DeliveryError("Work thread title lookup returned a different destination", "rejected");
+      if (thread.archived !== false || !current()) return;
+      const base = thread.title.replace(/^(?:⏳|✅) /u, "");
+      if (!base.trim() || state === "paused" && !thread.title.startsWith("⏳ ")) return;
+      const prefix = state === "open" ? "⏳ " : state === "completed" ? "✅ " : "";
+      // Keep the title within Discord's name limit without splitting a surrogate pair.
+      const title = (prefix + base).slice(0, 100).replace(/[\uD800-\uDBFF]$/, "").trimEnd();
+      if (title === thread.title) return;
+      this.laneMutations++;
+      try {
+        const result = await update(route, { title });
+        if (physicalRouteKey(result.route) !== physicalRouteKey(route) || result.title !== title)
+          throw new DeliveryError("Work thread title update could not be confirmed", "uncertain");
+      } finally { this.laneMutations--; }
+    });
+  }
+
   async pause(id: string): Promise<void> {
     this.assertRestartOpen();
     this.pauseRevisions.set(id, (this.pauseRevisions.get(id) ?? 0) + 1);
     this.laneMutations++;
     try {
       const lane = this.requireLane(id);
-      if (lane.workState === "open" || lane.workState === "paused") this.store.updateLane(id, lane.generation, { workState: "paused" });
+      if (lane.workState === "open" && this.store.updateLane(id, lane.generation, { workState: "paused" }))
+        this.background(this.syncLaneThreadTitle(lane, "paused"));
       const live = this.live.get(id);
       const failures: unknown[] = [];
       if (live) {
@@ -2188,7 +2234,9 @@ export class Superagent {
       if (this.store.approvals(id).length) throw new Error("Lane has unresolved approvals");
       if (outcome === "cancelled") for (const input of this.store.inputs(id)) this.store.settle(input.id, "cancelled");
       if (this.store.inputs(id).length) throw new Error("Resolve queued or uncertain lane inputs before completing work");
-      this.store.updateLane(id, lane.generation, { workState: outcome, result: evidence });
+      const previous = this.requireLane(id).workState;
+      if (this.store.updateLane(id, lane.generation, { workState: outcome, result: evidence }) && previous !== outcome)
+        this.background(this.syncLaneThreadTitle(lane, outcome));
       if (live) await this.release(live);
     } finally { this.laneMutations--; }
   }
@@ -3972,7 +4020,11 @@ export class Superagent {
     }
     if (frame.type === "agent_start") {
       live.busy = true;
-      if (live.input) { live.ownedRuns++; live.running = true; }
+      if (live.input) {
+        live.ownedRuns++;
+        live.running = true;
+        if (live.id !== "main" && live.ownedRuns === 1) this.background(this.syncLaneThreadTitle(this.requireLane(live.id), "open"));
+      }
       for (const { input } of live.admitted.values()) this.activity(input, true);
     }
     if (frame.type === "agent_end") live.running = false;

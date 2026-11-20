@@ -131,6 +131,14 @@ permissions, then reads back title, tags or archived state. Exact tag IDs and
 required/moderated tag policy apply. Archiving a thread does not pause its lane,
 and reopening it does not resume it.
 
+For a bound Discord work thread, an owned native run adds `⏳` to the title;
+verified `lane_close` completion replaces it with `✅`. Native settlement alone
+does not mark work complete. Pausing clears the working marker and cancelling
+clears either marker. Resumed work gets the working marker again when it runs.
+The head reads the current title and updates its prefix through the same
+authorized thread API. These edits need Manage Threads, are best effort, and
+skip archived threads. They do not change tags, archive state, or lane execution.
+
 `/help`, `/status`, `/context` and `/usage` are code-handled reads with no model
 turn. [`/usage`](../../src/omp-usage.ts) invokes the configured executable and
 profile with `usage --json --redact --no-extensions` and projects provider quota
