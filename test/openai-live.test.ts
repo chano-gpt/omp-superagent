@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { openLive } from "../src/openai-live.ts";
+import { openLive } from "./oracles/bun-gateway/openai-live.ts";
 
 const providerKey = "sk-fixture-secret";
 const options = { model: "gpt-live-1", voice: "noeul", apiKey: providerKey, backendModel: "gpt-6-luna" };

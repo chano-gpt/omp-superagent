@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import type { ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type Static, Type } from "@sinclair/typebox";
-import { type LaneEvidence, type LaneReportEvent, type LaneWaitTarget, parseLaneReportResult } from "./lane-report";
+import { type LaneEvidence, type LaneReportEvent, parseLaneReportResult } from "./lane-report";
 import { registerDecisionAsk } from "./decision-tool";
 
 const instructions = readFileSync(new URL("../skills/lane/SKILL.md", import.meta.url), "utf8");
@@ -75,18 +76,29 @@ function fileEvidence(path: string, cwd: string): LaneEvidence {
   }
 }
 
-function toolRecords(ctx: ExtensionContext, id: string) {
-  const branch = ctx.sessionManager.getBranch();
-  const call = branch.flatMap(entry => entry.type === "message" && entry.message.role === "assistant"
-    ? entry.message.content.filter(block => block.type === "toolCall" && block.id === id) : [])
-    .find(block => block.type === "toolCall");
-  const result = branch.findLast(entry => entry.type === "message" && entry.message.role === "toolResult" &&
-    entry.message.toolCallId === id);
-  return { call, result: result?.type === "message" && result.message.role === "toolResult" ? result.message : undefined };
+function toolRecords(ctx: ExtensionContext, ids: ReadonlySet<string>) {
+  const calls = new Map<string, ToolCall>();
+  const results = new Map<string, ToolResultMessage>();
+  if (ids.size > 0) {
+    // Branch order preserves the first call and the last result for each ID.
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "message") continue;
+      const message = entry.message;
+      if (message.role === "assistant") {
+        for (const block of message.content) {
+          if (block.type === "toolCall" && ids.has(block.id) && !calls.has(block.id)) calls.set(block.id, block);
+        }
+      } else if (message.role === "toolResult" && ids.has(message.toolCallId)) {
+        results.set(message.toolCallId, message);
+      }
+    }
+  }
+  return { calls, results };
 }
 
-function toolEvidence(id: string, ctx: ExtensionContext): LaneEvidence {
-  const { call, result } = toolRecords(ctx, id);
+function toolEvidence(id: string, records: ReturnType<typeof toolRecords>): LaneEvidence {
+  const call = records.calls.get(id);
+  const result = records.results.get(id);
   if (!call || !result || result.toolName !== call.name || result.isError !== false ||
       coordinationTool(call.name) || (typeof call.arguments.path === "string" &&
         /^xd:\/\/(?:lane_report|board_[a-z_]+)(?:[/?#]|$)/.test(call.arguments.path)) ||
@@ -155,21 +167,26 @@ export default function laneExtension(pi: ExtensionAPI): void {
     async execute(id, params, _signal, _onUpdate, ctx) {
       if (ctx.agent.kind !== "main") throw new Error("Lane reporting is restricted to the root lane session");
       if (!validInput(params)) throw new Error("Invalid lane report parameters");
-      if (params.status === "waiting") {
-        const target: LaneWaitTarget = params.waiting;
-        if (target.kind === "tool") {
-          const { call, result } = toolRecords(ctx, target.id);
-          if (!call || result || target.id === id || call.name === "lane_report") {
-            throw new Error("Lane tool wait requires an actual pending native tool call");
-          }
-        } else if (target.kind === "approval" && !approvals(ctx).has(target.id)) {
-          throw new Error("Lane approval wait requires an observed pending native tool approval");
-        } else if (target.kind === "job" && !ctx.getAsyncJobSnapshot()?.running.some(job => job.id === target.id)) {
-          throw new Error("Lane job wait requires a running native session job");
+      const target = params.status === "waiting" ? params.waiting : undefined;
+      if (target?.kind === "approval" && !approvals(ctx).has(target.id)) {
+        throw new Error("Lane approval wait requires an observed pending native tool approval");
+      }
+      if (target?.kind === "job" && !ctx.getAsyncJobSnapshot()?.running.some(job => job.id === target.id)) {
+        throw new Error("Lane job wait requires a running native session job");
+      }
+      const references = params.evidence ?? [];
+      const ids = new Set<string>();
+      if (target?.kind === "tool") ids.add(target.id);
+      for (const item of references) if (item.kind === "tool") ids.add(item.toolCallId);
+      const records = toolRecords(ctx, ids);
+      if (target?.kind === "tool") {
+        const call = records.calls.get(target.id);
+        if (!call || records.results.has(target.id) || target.id === id || call.name === "lane_report") {
+          throw new Error("Lane tool wait requires an actual pending native tool call");
         }
       }
-      const selected = (params.evidence ?? []).map(item => item.kind === "file"
-        ? fileEvidence(item.path, ctx.cwd) : toolEvidence(item.toolCallId, ctx));
+      const selected = references.map(item => item.kind === "file"
+        ? fileEvidence(item.path, ctx.cwd) : toolEvidence(item.toolCallId, records));
       const event: LaneReportEvent = {
         type: "superagent-lane-report", sessionId: ctx.sessionManager.getSessionId(), reportId: id,
         report: { status: params.status, summary: params.summary, evidence: selected,

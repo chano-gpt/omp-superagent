@@ -23,10 +23,10 @@ not a multitenant service or an OS sandbox.
 | Component | Responsibility | Entry points |
 | --- | --- | --- |
 | CLI and setup | Configuration, credentials, doctor, start/status/stop and one-shot macOS registration. | [CLI](src/cli.ts), [config](src/config.ts), [setup](src/setup.ts), [credentials](src/credentials.ts), [autostart](src/autostart.ts) |
-| Gateway | Authenticates all configured adapters, admits intake durably, proxies scoped messenger effects and supervises exactly one head. It never connects to lane RPC or decides work. | [Gateway](src/gateway.ts), [server](src/gateway-server.ts), [ingress ledger](src/gateway-store.ts), [client](src/gateway-client.ts), [adapter hub](src/messengers.ts) |
+| Gateway | One Rust process authenticates the configured adapters, admits intake durably, proxies scoped messenger effects and supervises exactly one head. It never connects to lane RPC or decides work. | [Gateway](gateway/src/main.rs), [server](gateway/src/server.rs), [ingress ledger](gateway/src/store.rs), [client](src/gateway-client.ts), [adapter hub](gateway/src/adapter.rs) |
 | Head | Interprets every ordinary message and follow-up, runs direct work or explicitly dispatches lanes, owns approvals and reporting, and decides what is sent back. | [Head extension](src/extension.ts), [runtime](src/runtime.ts), [coordination store](src/store.ts) |
 | Lane | Runs its assigned work in its own native session with its own cwd, model and context; reports to the head, not directly to a messenger. | [Lane extension](src/lane-extension.ts), [lane reporting](src/lane-report.ts), [role instructions](skills/lane/SKILL.md) |
-| Host | One installed OMP process owns each managed root session. A detached Bun stdio owner keeps its private reconnectable transport alive, without inference, tools, or supervision decisions. | [Host client](src/host.ts), [stdio owner](src/host-owner.ts), [native lifecycle extension](src/host-extension.ts) |
+| Host | One installed OMP process owns each managed root session. A detached Rust process owns its stdin/stdout and private reconnectable socket; it does not run inference, tools, or supervision policy. | [Host client](src/host.ts), [stdio owner](host-owner/src/main.rs), [SDK helper](src/host-sdk-helper.ts), [native lifecycle extension](src/host-extension.ts) |
 | Board | An informational log in `coordination.sqlite` shared by registered head/lane sessions in the same instance. Not a command, approval, or delivery bus. | [Board](src/board.ts), [board extension](src/board-extension.ts) |
 
 OMP owns transcripts, tool history, goals, child tasks, provider auth, and native
@@ -37,6 +37,13 @@ connections. It is not a second OMP transcript. The private Unix sockets under t
 canonical `stateDir` are instance-owned, not arbitrary URLs or a general RPC proxy.
 Native children get neither the manager nor the board. Managed extensions are not
 installed globally into ordinary OMP.
+
+The operator CLI is still Bun, not a second resident Gateway. `start` invokes
+the packaged native launcher; the daemon constructs only the configured
+transports. The short-lived config reader reuses the CLI parser without
+importing OMP or messenger SDKs. Session recovery and named preset validation
+use their public OMP interfaces on demand; no OMP source or core patch is
+part of the native build.
 
 ## Startup, readiness, and shutdown
 
@@ -88,6 +95,9 @@ lifecycle control, not a model turn. It can be admitted while the head is busy:
   The Gateway's one-shot successor waits for the old lifetime lock to release.
   A later operator stop invalidates the restart and prevents successor revival.
 - Restore the exact head native session and saved model/effort and reconcile approvals.
+  For the same model identified as non-reasoning by both Hosts, stock OMP can
+  represent inactive effort as either absent or `off`. Any other effort mismatch
+  keeps intake held; a configured default is not evidence of active effort.
   Reconnect to resident lanes within the Host budget only when ownership and
   generation match. Leave out-of-budget Hosts untouched and unloaded lanes unloaded.
   Restore native admission and outcomes from matching journal evidence, not receipts

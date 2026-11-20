@@ -74,6 +74,7 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS board_channel_order ON board_messages(channel, id);
   CREATE INDEX IF NOT EXISTS board_thread_order ON board_messages(thread, id);
+  CREATE INDEX IF NOT EXISTS board_lane_notice_order ON board_messages(id) WHERE role = 'lane';
   CREATE TABLE IF NOT EXISTS board_mentions (
     message_id INTEGER NOT NULL REFERENCES board_messages(id), actor TEXT NOT NULL,
     PRIMARY KEY(message_id, actor)
@@ -88,9 +89,12 @@ const SCHEMA = `
     read_at INTEGER, noticed_at INTEGER,
     PRIMARY KEY(session_id, message_id)
   );
+  CREATE TABLE IF NOT EXISTS board_notice_scans (
+    session_id TEXT PRIMARY KEY REFERENCES board_sessions(session_id), position INTEGER NOT NULL
+  );
 `;
 
-interface MessageRow {
+interface NoticeRow {
   id: number;
   session_id: string;
   actor: string;
@@ -98,16 +102,23 @@ interface MessageRow {
   channel: string;
   thread: number;
   reply_to: number | null;
-  text: string;
   mentions: string;
   created_at: number;
 }
 
-const message = (row: MessageRow): BoardMessage => ({
+interface MessageRow extends NoticeRow { text: string }
+
+const notice = (row: NoticeRow): BoardNotice => ({
   id: row.id, sessionId: row.session_id, actor: row.actor, role: row.role,
   channel: row.channel, thread: row.thread, replyTo: row.reply_to,
-  text: row.text, mentions: JSON.parse(row.mentions) as string[], createdAt: row.created_at,
+  mentions: JSON.parse(row.mentions) as string[], createdAt: row.created_at,
 });
+const message = (row: MessageRow): BoardMessage => ({ ...notice(row), text: row.text });
+
+const UNREAD = `NOT EXISTS (SELECT 1 FROM board_receipts r
+  WHERE r.session_id = ? AND r.message_id = m.id AND r.read_at IS NOT NULL)`;
+const UNNOTIFIED = `NOT EXISTS (SELECT 1 FROM board_receipts r
+  WHERE r.session_id = ? AND r.message_id = m.id AND (r.read_at IS NOT NULL OR r.noticed_at IS NOT NULL))`;
 
 function actorName(value: string): void {
   if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new Error("Invalid board actor");
@@ -247,12 +258,16 @@ export class Board {
     if (input.after !== undefined) position(input.after, "after position", 0);
     return this.db.transaction(() => {
       this.requireMembership();
-      const rows = this.db.query(`SELECT m.* FROM board_messages m
-        LEFT JOIN board_receipts r ON r.message_id = m.id AND r.session_id = ?
-        WHERE m.id > ? AND (? IS NULL OR m.channel = ?) AND (? IS NULL OR m.thread = ?)
-          AND (? = 0 OR r.read_at IS NULL) ORDER BY m.id LIMIT ?`)
-        .all(this.identity.sessionId, input.after ?? 0, input.channel ?? null, input.channel ?? null,
-          input.thread ?? null, input.thread ?? null, input.unreadOnly === false ? 0 : 1, limit) as MessageRow[];
+      const unread = input.unreadOnly !== false;
+      const scope = unread
+        ? ["m.id > MAX(?, (SELECT read_cursor FROM board_sessions WHERE session_id = ?))", UNREAD]
+        : ["m.id > ?"];
+      const bindings: Array<number | string> = [input.after ?? 0];
+      if (unread) bindings.push(this.identity.sessionId, this.identity.sessionId);
+      if (input.channel !== undefined) { scope.push("m.channel = ?"); bindings.push(input.channel); }
+      if (input.thread !== undefined) { scope.push("m.thread = ?"); bindings.push(input.thread); }
+      const rows = this.db.query<MessageRow, Array<number | string>>(`SELECT m.* FROM board_messages m
+        WHERE ${scope.join(" AND ")} ORDER BY m.id LIMIT ?`).all(...bindings, limit);
       this.markRead(rows.map(row => row.id));
       return rows.map(message);
     }).immediate();
@@ -264,11 +279,31 @@ export class Board {
     for (const channel of unique) channelName(channel);
     this.db.transaction(() => {
       this.requireMembership();
-      this.db.query("DELETE FROM board_subscriptions WHERE session_id = ?").run(this.identity.sessionId);
-      for (const channel of unique) {
-        this.db.query("INSERT INTO board_subscriptions(session_id, channel) VALUES (?, ?)")
-          .run(this.identity.sessionId, channel);
+      const { sessionId, actor, role } = this.identity;
+      const previous = new Set(this.subscriptions());
+      const requested = new Set(unique);
+      for (const channel of previous) {
+        if (!requested.has(channel)) this.db.query("DELETE FROM board_subscriptions WHERE session_id = ? AND channel = ?")
+          .run(sessionId, channel);
       }
+      const start = role === "lane" ? this.noticePosition() : 0;
+      let rewind = start;
+      for (const channel of unique) {
+        if (previous.has(channel)) continue;
+        this.db.query("INSERT INTO board_subscriptions(session_id, channel) VALUES (?, ?)")
+          .run(sessionId, channel);
+        // Reopening eligibility can reveal older undelivered posts. Seek just
+        // this channel; precise receipts still exclude bodies or headers seen.
+        if (rewind !== 0) {
+          const older = this.db.query<{ id: number }, [string, string, number, string, string]>(`
+            SELECT m.id FROM board_messages m
+            WHERE m.channel = ? AND m.id > (SELECT read_cursor FROM board_sessions WHERE session_id = ?)
+              AND m.id <= ? AND m.actor <> ? AND ${UNNOTIFIED}
+            ORDER BY m.id LIMIT 1`).get(channel, sessionId, rewind, actor, sessionId);
+          if (older) rewind = older.id - 1;
+        }
+      }
+      if (rewind < start) this.setNoticePosition(rewind);
     }).immediate();
     return this.state();
   }
@@ -278,29 +313,32 @@ export class Board {
     pageSize(limit);
     return this.db.transaction(() => {
       this.requireMembership();
-      const rows = this.db.query(`SELECT m.* FROM board_messages m
-        LEFT JOIN board_receipts r ON r.message_id = m.id AND r.session_id = ?
-        WHERE m.actor != ? AND r.read_at IS NULL AND r.noticed_at IS NULL AND (
-          (? = 'head' AND m.role = 'lane') OR (? = 'lane' AND (
-            EXISTS (SELECT 1 FROM board_mentions n WHERE n.message_id = m.id AND n.actor = ?) OR
-            EXISTS (SELECT 1 FROM board_subscriptions s WHERE s.session_id = ? AND s.channel = m.channel)
-          ))) ORDER BY m.id LIMIT ?`)
-        .all(this.identity.sessionId, this.identity.actor, this.identity.role, this.identity.role,
-          this.identity.actor, this.identity.sessionId, limit) as MessageRow[];
-      const now = Date.now();
-      for (const row of rows) {
-        this.db.query(`INSERT INTO board_receipts(session_id, message_id, noticed_at) VALUES (?, ?, ?)
+      const { sessionId, actor, role } = this.identity;
+      const start = this.noticePosition();
+      const end = this.db.query<{ id: number }, []>("SELECT COALESCE(MAX(id), 0) AS id FROM board_messages").get()?.id ?? 0;
+      if (start >= end) return [];
+      const eligibility = role === "head" ? "m.role = 'lane'" : `(
+        EXISTS (SELECT 1 FROM board_mentions n WHERE n.message_id = m.id AND n.actor = ?) OR
+        EXISTS (SELECT 1 FROM board_subscriptions s WHERE s.session_id = ? AND s.channel = m.channel))`;
+      const audience = role === "head" ? [] : [actor, sessionId];
+      const rows = this.db.query<NoticeRow, Array<number | string>>(`
+        SELECT m.id, m.session_id, m.actor, m.role, m.channel, m.thread, m.reply_to, m.mentions, m.created_at
+        FROM board_messages m WHERE m.id > ? AND m.actor <> ? AND ${eligibility} AND ${UNNOTIFIED}
+        ORDER BY m.id LIMIT ?`).all(start, actor, ...audience, sessionId, limit);
+      const last = rows.at(-1);
+      if (last) {
+        this.db.query(`INSERT INTO board_receipts(session_id, message_id, noticed_at)
+          SELECT ?, value, ? FROM json_each(?) WHERE true
           ON CONFLICT(session_id, message_id) DO UPDATE SET noticed_at = excluded.noticed_at`)
-          .run(this.identity.sessionId, row.id, now);
-      }
-      if (rows.length) {
+          .run(sessionId, Date.now(), JSON.stringify(rows.map(row => row.id)));
         this.db.query("UPDATE board_sessions SET notice_cursor = MAX(notice_cursor, ?) WHERE session_id = ?")
-          .run(rows[rows.length - 1]!.id, this.identity.sessionId);
+          .run(last.id, sessionId);
       }
-      return rows.map(row => {
-        const { text: _text, ...header } = message(row);
-        return header;
-      });
+      // Unlike notice_cursor, this is the examined prefix under the current
+      // eligibility rules, including irrelevant posts. A full page proves
+      // only through its last row; subscribe rewinds for newly relevant gaps.
+      this.setNoticePosition(last && rows.length === limit ? last.id : end);
+      return rows.map(notice);
     }).immediate();
   }
 
@@ -308,13 +346,23 @@ export class Board {
     this.requireMembership();
     const row = this.db.query("SELECT read_cursor, notice_cursor FROM board_sessions WHERE session_id = ?")
       .get(this.identity.sessionId) as { read_cursor: number; notice_cursor: number };
-    const subscriptions = this.db.query("SELECT channel FROM board_subscriptions WHERE session_id = ? ORDER BY channel")
-      .all(this.identity.sessionId) as Array<{ channel: string }>;
-    const channels = this.db.query("SELECT DISTINCT channel FROM board_messages ORDER BY channel")
-      .all() as Array<{ channel: string }>;
+    // Seek to the next distinct channel instead of scanning every message in
+    // the channel index for each explicit history or subscription response.
+    const channels = this.db.query<{ channel: string }, []>(`
+      WITH RECURSIVE channels(channel) AS (
+        SELECT MIN(channel) FROM board_messages
+        UNION ALL
+        SELECT (SELECT channel FROM board_messages WHERE channel > c.channel ORDER BY channel LIMIT 1)
+        FROM channels c WHERE c.channel IS NOT NULL
+      ) SELECT channel FROM channels WHERE channel IS NOT NULL`).all();
     return { identity: { ...this.identity }, readCursor: row.read_cursor, noticeCursor: row.notice_cursor,
-      subscriptions: subscriptions.map(item => item.channel),
+      subscriptions: this.subscriptions(),
       channels: [...new Set(["general", this.repositoryChannel, ...channels.map(item => item.channel)])].sort() };
+  }
+
+  membership(): Readonly<BoardIdentity> {
+    this.requireMembership();
+    return this.identity;
   }
 
   close(): void {
@@ -326,6 +374,24 @@ export class Board {
   private get(id: number): BoardMessage | null {
     const row = this.db.query("SELECT * FROM board_messages WHERE id = ?").get(id) as MessageRow | null;
     return row ? message(row) : null;
+  }
+
+  private subscriptions(): string[] {
+    return this.db.query<{ channel: string }, [string]>("SELECT channel FROM board_subscriptions WHERE session_id = ? ORDER BY channel")
+      .all(this.identity.sessionId).map(row => row.channel);
+  }
+
+  private noticePosition(): number {
+    const row = this.db.query<{ position: number }, [string]>(`SELECT MAX(s.read_cursor, COALESCE(n.position, 0)) AS position
+      FROM board_sessions s LEFT JOIN board_notice_scans n USING(session_id) WHERE s.session_id = ?`)
+      .get(this.identity.sessionId);
+    if (!row) throw new BoardMembershipError();
+    return row.position;
+  }
+
+  private setNoticePosition(position: number): void {
+    this.db.query(`INSERT INTO board_notice_scans(session_id, position) VALUES (?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET position = excluded.position`).run(this.identity.sessionId, position);
   }
 
   private requireMembership(): number {
@@ -375,22 +441,20 @@ export class Board {
 
   private markRead(ids: number[]): void {
     if (!ids.length) return;
-    const now = Date.now();
-    for (const id of ids) {
-      this.db.query(`INSERT INTO board_receipts(session_id, message_id, read_at) VALUES (?, ?, ?)
-        ON CONFLICT(session_id, message_id) DO UPDATE SET read_at = excluded.read_at`)
-        .run(this.identity.sessionId, id, now);
-    }
+    const { sessionId } = this.identity;
+    this.db.query(`INSERT INTO board_receipts(session_id, message_id, read_at)
+      SELECT ?, value, ? FROM json_each(?) WHERE true
+      ON CONFLICT(session_id, message_id) DO UPDATE SET read_at = excluded.read_at`)
+      .run(sessionId, Date.now(), JSON.stringify(ids));
     // Only a contiguous, exactly observed prefix advances the read cursor. Filters,
     // pagination, replies and a high notice cursor cannot acknowledge unseen gaps.
-    const gap = this.db.query(`SELECT MIN(m.id) AS id FROM board_messages m
-      LEFT JOIN board_receipts r ON r.message_id = m.id AND r.session_id = ?
-      WHERE m.id > (SELECT read_cursor FROM board_sessions WHERE session_id = ?) AND r.read_at IS NULL`)
-      .get(this.identity.sessionId, this.identity.sessionId) as { id: number | null };
-    const end = gap.id === null
-      ? (this.db.query("SELECT COALESCE(MAX(id), 0) AS id FROM board_messages").get() as { id: number }).id
+    const gap = this.db.query<{ id: number }, [string, string]>(`SELECT m.id FROM board_messages m
+      WHERE m.id > (SELECT read_cursor FROM board_sessions WHERE session_id = ?) AND ${UNREAD}
+      ORDER BY m.id LIMIT 1`).get(sessionId, sessionId);
+    const end = !gap
+      ? this.db.query<{ id: number }, []>("SELECT COALESCE(MAX(id), 0) AS id FROM board_messages").get()?.id ?? 0
       : gap.id - 1;
-    this.db.query("UPDATE board_sessions SET read_cursor = MAX(read_cursor, ?) WHERE session_id = ?")
-      .run(end, this.identity.sessionId);
+    this.db.query("UPDATE board_sessions SET read_cursor = ? WHERE session_id = ? AND read_cursor < ?")
+      .run(end, sessionId, end);
   }
 }

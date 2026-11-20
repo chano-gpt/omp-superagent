@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
-import { mkdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdir, mkdtempDisposable } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
@@ -33,18 +35,70 @@ const directory = join(root, "dist");
 await mkdir(directory, { recursive: true });
 const sourceFilename = `${name}-${version}.tar.gz`;
 const packageFilename = `${name}-${version}.tgz`;
-const archive = join(directory, sourceFilename);
-await run(["git", "archive", "--format=tar.gz", `--prefix=${name}-${version}/`, `--output=${archive}`, revision]);
-await run([process.execPath, "pm", "pack", "--ignore-scripts", "--filename", join(directory, packageFilename)]);
+const nativePlatforms = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"] as const;
+const nativePackages = [
+  { directory: "host-owner", binary: "omp-host-owner" },
+  { directory: "gateway", binary: "omp-gateway" },
+] as const;
+
+async function verifyNativePayload(directory: string): Promise<void> {
+  for (const pkg of nativePackages) {
+    const binDir = join(directory, pkg.directory, "bin");
+    for (const platform of nativePlatforms) {
+      await access(join(binDir, `${pkg.binary}-${platform}`), constants.X_OK);
+      const notices = join(binDir, "notices", platform);
+      await access(join(notices, "Cargo-LICENSES.txt"));
+      await access(join(notices, "Cargo-SOURCES.txt"));
+      await access(join(notices, "rust", "COPYRIGHT-library.html"));
+      await access(join(notices, "rust", "licenses"));
+    }
+  }
+}
+
+if (mode === undefined) {
+  // Each target's CI runner builds both packages with --locked; the archive
+  // job assembles those same outputs instead of rebuilding any one target.
+  await verifyNativePayload(root);
+  const archive = join(directory, sourceFilename);
+  const sourcePrefix = `${name}-${version}/`;
+  await run(["git", "archive", "--format=tar.gz", `--prefix=${sourcePrefix}`, `--output=${archive}`, revision]);
+  const sources = new Set((await run(["tar", "-tzf", archive])).split("\n"));
+  if (!sources.has(`${sourcePrefix}.cargo/config.toml`)) throw new Error("Source archive lacks .cargo/config.toml");
+  for (const pkg of nativePackages) {
+    const prefix = `${sourcePrefix}${pkg.directory}/`;
+    for (const file of ["Cargo.toml", "Cargo.lock", "src/main.rs"]) {
+      if (!sources.has(`${prefix}${file}`)) throw new Error(`Source archive lacks ${pkg.directory}/${file}`);
+    }
+    if ([...sources].some(file => file.startsWith(`${prefix}target/`) || file.startsWith(`${prefix}bin/`))) {
+      throw new Error(`The source archive contains generated ${pkg.directory} artifacts`);
+    }
+  }
+  const npmArchive = join(directory, packageFilename);
+  await run([process.execPath, "pm", "pack", "--ignore-scripts", "--filename", npmArchive]);
+  const files = (await run(["tar", "-tzf", npmArchive])).split("\n");
+  for (const pkg of nativePackages) {
+    const prefix = `package/${pkg.directory}/`;
+    if (files.some(file => file.startsWith(prefix) && file !== prefix && !file.startsWith(`${prefix}bin/`))) {
+      throw new Error(`Unexpected ${pkg.directory} build or source data in the npm tarball`);
+    }
+  }
+  // Packlist checks alone cannot detect a packer that strips executable bits.
+  await using unpacked = await mkdtempDisposable(join(tmpdir(), "omp-sa-pack-"));
+  await run(["tar", "-xzf", npmArchive, "-C", unpacked.path]);
+  await verifyNativePayload(join(unpacked.path, "package"));
+}
+
 const assets: string[] = [];
 for (const filename of [sourceFilename, packageFilename]) {
   const path = join(directory, filename);
   const digest = new Bun.CryptoHasher("sha256").update(await Bun.file(path).arrayBuffer()).digest("hex");
   const checksum = `${path}.sha256`;
-  await Bun.write(checksum, `${digest}  ${filename}\n`);
+  const contents = `${digest}  ${filename}\n`;
+  if (mode === undefined) await Bun.write(checksum, contents);
+  else if (await Bun.file(checksum).text() !== contents) throw new Error(`Packaged asset checksum mismatch: ${filename}`);
   assets.push(path, checksum);
 }
-console.log(`Packaged ${revision}\n${assets.join("\n")}`);
+console.log(`${mode === undefined ? "Packaged" : "Verified staged release for"} ${revision}\n${assets.join("\n")}`);
 if (mode === "--publish") {
   console.log(await run(["gh", "release", "create", tag, ...assets,
     "--verify-tag", "--title", `${name} ${version}`, "--notes-file", notes]));

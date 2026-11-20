@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { activeManagedUlw, managedUlwLaunchExtensions, managedUlwStatus, updateManagedUlw, type UlwManifest } from "../src/managed-ulw";
 import { connect, startHost, type HostOptions } from "../src/host";
 import { getExtensionNameFromPath } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { stopHostFixtures } from "./fixtures/host-fixture-processes";
 import { writeStockHostExecutable } from "./fixtures/stock-host";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -18,11 +19,11 @@ async function writable(path: string): Promise<void> {
       for (const entry of await readdir(path)) await writable(join(path, entry));
     } else await chmod(path, 0o600);
   } catch (error) {
-    // A terminating Host may remove its own .launch-* directory during cleanup.
+    // startHost may still be removing its private .launch-* directory after exit.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); }, { timeout: 45_000 });
 
 async function command(args: string[], cwd: string): Promise<string> {
   const child = Bun.spawn(args, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -37,7 +38,26 @@ async function promptExtension(revision: string, defect = "none"): Promise<strin
 }
 async function fixture(packageName = "omp-ulw") {
   const root = await mkdtemp(join(await realpath("/tmp"), "omu-"));
-  cleanups.push(async () => { await writable(root); await rm(root, { recursive: true, force: true }); });
+  const starting: ReturnType<typeof startHost>[] = [];
+  let closing = false;
+  cleanups.push(async () => {
+    closing = true;
+    if (starting.length) {
+      // A rejected or interrupted start may already have spawned both processes.
+      const outcomes = await Promise.allSettled(starting);
+      const started = outcomes.filter(outcome => outcome.status === "fulfilled").length;
+      const exited = await stopHostFixtures(root);
+      if (exited < started) throw new Error(`Expected ${started} Host fixture receipts, found ${exited}; retained ${root}`);
+    }
+    await writable(root);
+    await rm(root, { recursive: true, force: true });
+  });
+  const startFixtureHost = (options: HostOptions) => {
+    if (closing) throw new Error(`Host fixture teardown has started: ${root}`);
+    const launch = startHost(options);
+    starting.push(launch);
+    return launch;
+  };
   const remote = join(root, "remote");
   const managed = join(root, "managed");
   await mkdir(remote);
@@ -63,7 +83,7 @@ async function fixture(packageName = "omp-ulw") {
   const options = { manifestPath, root: managed };
   const cli = (...extra: string[]) => command([process.execPath, resolve(import.meta.dir, "../scripts/prepare-ulw.ts"),
     "--manifest", manifestPath, "--root", managed, ...extra], root);
-  return { root, remote, managed, options, first, manifest, manifestPath, commit, cli };
+  return { root, remote, managed, options, first, manifest, manifestPath, commit, cli, startFixtureHost };
 }
 
 async function launchFixture(packageName = "omp-superkit", alternateName = "omp-ulw") {
@@ -432,8 +452,10 @@ test("new Hosts select the newly active package despite an old head marker; live
   const firstPath = activeManagedUlw(f.options);
   const launcher = join(f.root, "host.ts");
   await writeStockHostExecutable(launcher, `import * as fs from 'node:fs';
+import { recordHostFixture } from ${JSON.stringify(resolve(import.meta.dir, "fixtures/host-fixture-processes.ts"))};
 import { stockHostFixture } from ${JSON.stringify(resolve(import.meta.dir, "fixtures/stock-host.ts"))};
 import { readSessionHeaderId } from ${JSON.stringify(import.meta.resolve("@oh-my-pi/pi-coding-agent/session/session-loader"))};
+recordHostFixture(${JSON.stringify(f.root)});
 const args=process.argv.slice(2); const value=flag=>args[args.indexOf(flag)+1];
 const socket=process.env.OMP_SUPERAGENT_HOST_SOCKET; const sessionFile=value('--session');
 const packagePath=process.env.OMP_SUPERAGENT_MANAGED_ULW_PATH;
@@ -448,8 +470,7 @@ await stockHostFixture({sessionId,sessionFile,state:()=>({sessionName:fs.readFil
       sessionFile: join(f.root, `${name}.jsonl`), cwd: f.root, extensionPath: launcher,
       managedUlwRoot, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, PI_CODING_AGENT_DIR: join(home, "agent"), ...env },
       logPath: join(f.root, `${name}.log`), subagentConcurrency: 1 };
-    const { pid } = await startHost(options);
-    cleanups.push(async () => { try { process.kill(pid, "SIGKILL"); } catch {} });
+    await f.startFixtureHost(options);
     return JSON.parse(await readFile(options.socketPath + ".observed.json", "utf8")) as { packagePath: string; args: string[]; managedRoot: string };
   };
   const head = await launch("head", {}, f.managed);

@@ -96,7 +96,8 @@ no Rust toolchain, OMP source checkout, core patch, or native build is required.
 Dependency installation needs network access. It does not start a bot or replace OMP.
 
 The CLI command is **`omp-sa`**; the package name is `omp-superagent`.
-For a source checkout or extracted source tarball, run from its root instead:
+For a source checkout or extracted source tarball, install stable Rust/Cargo, CMake and a C toolchain first, then run from its root.
+Cargo builds Superagent’s native Gateway and Host owner, never OMP. Run `bun run build:native` after editing their Rust source.
 
 ```sh
 bun install --frozen-lockfile

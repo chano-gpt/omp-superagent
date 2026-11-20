@@ -47,7 +47,7 @@
    **API 모드:** `apiKeyEnv`가 가리키는 변수에 OpenAI 키를 설정하세요. Gateway의 환경 또는 기존 비공개 `FILE.env`를 사용하고,
    JSON에 키를 넣지 마세요. Discord 토큰과는 다른 변수여야 합니다. Gateway는 해당 변수를 HEAD·레인 환경에서 제외합니다.
 4. 프로젝트의 잠금 파일로 의존성을 설치하세요(`bun install --frozen-lockfile`).
-   음성 링크는 `@discordjs/voice`, DAVE 및 Opus가 필요합니다. 음성 모듈은 연결 시 로드하며 설치·진단 중 봇을 접속시키지 않습니다.
+   Rust Gateway에 DAVE 및 Opus가 포함됩니다. 음성 연결은 소유자가 명시적으로 시작할 때만 열며 설치·진단 중에는 봇을 접속시키지 않습니다.
    설정 변경은 다음 Gateway 시작에 반영됩니다.
 
 ### 구독 모드의 WebRTC 브리지 설치

@@ -1,0 +1,22 @@
+[package]
+name = "omp-host-owner"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "omp-host-owner"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+# Stock RPC v1 keeps the first object fields when a large event must be shrunk.
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+strip = true

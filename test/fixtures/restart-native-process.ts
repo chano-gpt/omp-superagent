@@ -11,8 +11,8 @@ import { loadConfig, requireMessengerCredentials } from "../../src/config";
 import { loadCredentials } from "../../src/credentials";
 import type { Approval, DialogResponse, Inbound, Messenger, OutputRecord, Route } from "../../src/contracts";
 import { DeliveryError } from "../../src/delivery";
-import { processAlive, runGatewayRestart } from "../../src/gateway-restart";
-import type { GatewayService } from "../../src/gateway";
+import { processAlive, runGatewayRestart } from "../oracles/bun-gateway/gateway-restart";
+import type { GatewayService } from "../oracles/bun-gateway/gateway";
 
 const arg = (name: string) => { const at = process.argv.indexOf(name); return at < 0 ? undefined : process.argv[at + 1]; };
 const configPath = arg("--config");
@@ -24,7 +24,7 @@ assert(!existsSync(join(root, "cleanup")), "No fixture process may activate afte
 loadCredentials(config);
 requireMessengerCredentials(config);
 // A static native import would run OMP's dotenv loader before this credential boundary.
-const { launchGateway, startGateway } = await import("../../src/gateway");
+const { launchGateway, startGateway } = await import("../oracles/bun-gateway/gateway");
 const self = fileURLToPath(import.meta.url);
 const runnerRequest = arg("--runner");
 const scenario = process.env.OMP_RESTART_NATIVE_SCENARIO;

@@ -9,9 +9,9 @@ import {
   RpcClient,
   type RpcAgentProcess,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import { isValidModelPresetName } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { RPC_GOAL_CONTINUATION_MODE } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
 import { HostChannel, type HostResponse, type HostState } from "./host-protocol";
+import { requireHostOwner } from "./host-owner-path";
 import { inspectInstalledOmp, resolveOmpCommand } from "./installed-omp";
 import type { DialogResponse, LanePresetSnapshot } from "./contracts";
 import { activeManagedUlw, managedUlwLaunchExtensions, MANAGED_ULW_ENV, MANAGED_ULW_FIXTURE_ENV, MANAGED_ULW_FIXTURE_ROOT_ENV, validateManagedUlwPackage } from "./managed-ulw";
@@ -153,6 +153,20 @@ export class HostConnection {
   }
 
   static async connect(socketPath: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<HostConnection> {
+    return (await HostConnection.open(socketPath, timeoutMs)).connection;
+  }
+
+  /** Internal runtime only: incremental deltas become activity ticks, not stock session events. */
+  static async connectForActivity(socketPath: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<HostConnection> {
+    return (await HostConnection.#open(socketPath, timeoutMs, "activity-v1")).connection;
+  }
+
+  static async open(socketPath: string, timeoutMs = CONNECT_TIMEOUT_MS) {
+    return await HostConnection.#open(socketPath, timeoutMs, "full");
+  }
+
+  /** Identity is captured once per fresh handshake, never reused across probes. */
+  static async #open(socketPath: string, timeoutMs: number, messageUpdates: "full" | "activity-v1") {
     const before = await socketIdentity(socketPath);
     const socket = net.createConnection(socketPath);
     const transport = new SocketProcess(socket);
@@ -161,11 +175,11 @@ export class HostConnection {
     timeout.unref();
     try {
       await connection.client.start();
+      const state = await connection.client.getState();
       const after = await socketIdentity(socketPath);
       if (before.dev !== after.dev || before.ino !== after.ino) {
         throw new Error("RPC socket identity changed while connecting");
       }
-      const state = await connection.client.getState();
       if (typeof state.sessionId !== "string" || !state.sessionId ||
           typeof state.sessionFile !== "string" || !path.isAbsolute(state.sessionFile) ||
           !Number.isSafeInteger(state.hostPid) || state.hostPid! < 1 ||
@@ -173,12 +187,28 @@ export class HostConnection {
           || state.adapterOwnerPid < 1) {
         throw new Error("Endpoint did not identify an owned stock-stdio adapter and persistent OMP session");
       }
-      return connection;
+      if (messageUpdates === "activity-v1") await connection.#enableActivityUpdates();
+      return { connection, identity: { pid: state.hostPid, ownerPid: state.adapterOwnerPid,
+        sessionId: state.sessionId, sessionFile: state.sessionFile, dev: after.dev, ino: after.ino } };
     } catch (error) {
       await connection.close();
       throw error;
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  async #enableActivityUpdates(): Promise<void> {
+    const capability = await this.request({ type: "get_host_admission", messageUpdateCapability: true });
+    if (!capability.success || capability.command !== "get_host_admission") {
+      throw new Error("Owned Host could not report its message update capability");
+    }
+    // An existing owner can be reattached without changing its native filter.
+    const messageUpdates = "activity-v1";
+    if (capability.data?.messageUpdates !== messageUpdates) return;
+    const response = await this.request({ type: "set_host_message_updates", messageUpdates });
+    if (!response.success || response.command !== "set_host_message_updates" || response.data?.messageUpdates !== messageUpdates) {
+      throw new Error("Owned Host did not acknowledge its advertised activity projection");
     }
   }
 
@@ -222,8 +252,8 @@ export function connect(socketPath: string): Promise<HostConnection> {
   return HostConnection.connect(socketPath);
 }
 
-export function buildHostArgs(options: HostOptions, configPath = `${options.socketPath}.config.json`,
-  composition?: { extensionPaths: string[]; noExtensions: boolean }): string[] {
+export async function buildHostArgs(options: HostOptions, configPath = `${options.socketPath}.config.json`,
+  composition?: { extensionPaths: string[]; noExtensions: boolean }): Promise<string[]> {
   assertSocketPath(options.socketPath);
   for (const [name, value] of Object.entries({
     sessionFile: options.sessionFile, cwd: options.cwd, extensionPath: options.extensionPath,
@@ -237,8 +267,13 @@ export function buildHostArgs(options: HostOptions, configPath = `${options.sock
   if (!Number.isSafeInteger(options.subagentConcurrency) || options.subagentConcurrency < 1) {
     throw new Error("subagentConcurrency must be a positive integer");
   }
-  if (options.modelPreset && !isValidModelPresetName(options.modelPreset.name))
-    throw new Error("A native model preset must have a valid name");
+  if (options.modelPreset) {
+    // Only named lane presets need the SDK's model resolver. HEAD launches
+    // (including restored model settings) must not load it just to build argv.
+    const { isValidModelPresetName } = await import("@oh-my-pi/pi-coding-agent/config/model-presets");
+    if (!isValidModelPresetName(options.modelPreset.name))
+      throw new Error("A native model preset must have a valid name");
+  }
   const managedUlwPath = selectManagedUlw(options);
   const extensions = composition?.extensionPaths ?? [
     fileURLToPath(new URL("../", import.meta.url)), managedUlwPath, options.extensionPath,
@@ -274,6 +309,7 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
   // during startup, but this Host must load one exact immutable package.
   const managedUlwPath = selectManagedUlw(options);
   const fixture = options.managedUlwPath ?? options.env[MANAGED_ULW_FIXTURE_ENV];
+  const hostOwnerExecutable = await requireHostOwner();
   const fixtureRoot = options.managedUlwRoot ?? options.env[MANAGED_ULW_FIXTURE_ROOT_ENV];
   const bun = options.env.OMP_SUPERAGENT_BUN ?? (path.basename(process.execPath) === "bun" ? process.execPath
     : Bun.which("bun", { PATH: options.env.PATH ?? process.env.PATH }));
@@ -283,7 +319,7 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
     OMP_SUPERAGENT_BUN: bun,
     ...(fixture ? { [MANAGED_ULW_FIXTURE_ENV]: fixture } : {}),
     ...(fixtureRoot ? { [MANAGED_ULW_FIXTURE_ROOT_ENV]: fixtureRoot } : {}) } };
-  buildHostArgs(options);
+  await buildHostArgs(options);
   await fs.mkdir(path.dirname(options.socketPath), { recursive: true, mode: 0o700 });
   await privateDirectory(path.dirname(options.socketPath));
   let existing = false;
@@ -332,13 +368,28 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
       fileURLToPath(new URL("./host-extension.ts", import.meta.url))];
     const composition = await managedUlwLaunchExtensions({ cwd: options.cwd, managedUlwPath,
       extensionPaths, configPath, commandArgs: options.command.slice(1),
-      launchArgs: [...options.command.slice(1), ...buildHostArgs(options, configPath)],
+      launchArgs: [...options.command.slice(1), ...await buildHostArgs(options, configPath)],
       env: options.env, bunCommand: [bun, "--no-env-file"] });
     const { env: _inheritedEnvironment, ...launchOptions } = options;
-    await fs.writeFile(manifestPath, JSON.stringify({ options: launchOptions, args: buildHostArgs(options, configPath, composition), configPath, processBackend,
-      nativeSocket: path.join(path.dirname(options.socketPath), `.n-${crypto.randomUUID().slice(0, 8)}.sock`) }),
-    { flag: "wx", mode: 0o600 });
-    child = spawn(bun, ["--no-env-file", fileURLToPath(new URL("./host-owner.ts", import.meta.url)), manifestPath], {
+    const helperPath = fileURLToPath(new URL("./host-sdk-helper.ts", import.meta.url));
+    const manifest = { options: launchOptions, args: await buildHostArgs(options, configPath, composition), configPath,
+      processBackend, helperPath, nativeSocket: path.join(path.dirname(options.socketPath), `.n-${crypto.randomUUID().slice(0, 8)}.sock`) };
+    // Preparation used to run inside the owner; it shares the same startup budget.
+    const deadline = Date.now() + START_TIMEOUT_MS;
+    const prepare = Bun.spawn([bun, "--no-env-file", helperPath, "prepare"], {
+      cwd: options.cwd, env: options.env, stdin: new Blob([JSON.stringify(manifest)]), stdout: "pipe", stderr: log.fd,
+      timeout: START_TIMEOUT_MS, killSignal: "SIGKILL",
+    });
+    const [prepared, code] = await Promise.all([new Response(prepare.stdout).text(), prepare.exited]);
+    if (Date.now() >= deadline) throw new Error("Native session preparation timed out");
+    if (code !== 0) throw new Error("Native session preparation failed");
+    const flags = JSON.parse(prepared);
+    if (typeof flags?.toolsExplicitlySelected !== "boolean" || typeof flags.noTools !== "boolean")
+      throw new Error("Native session preparation did not confirm tool selection");
+    await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, toolsExplicitlySelected: flags.toolsExplicitlySelected,
+      noTools: flags.noTools, inventory: flags.inventory }), { flag: "wx", mode: 0o600 });
+    if (Date.now() >= deadline) throw new Error("Native Host startup timed out before launch");
+    child = spawn(hostOwnerExecutable, [manifestPath], {
       cwd: options.cwd, env: options.env,
       detached: true, stdio: ["ignore", log.fd, log.fd], shell: false,
     });
@@ -350,7 +401,6 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
     child.unref();
     await log.close();
     log = undefined;
-    const deadline = Date.now() + START_TIMEOUT_MS;
     let startingSocket: Stats | undefined;
     while (Date.now() < deadline) {
       if (failure) throw failure;
@@ -377,24 +427,17 @@ async function launchHost(options: HostOptions): Promise<{ pid: number }> {
         await Bun.sleep(50);
         continue;
       }
-      const connection = await HostConnection.connect(options.socketPath, Math.max(1, deadline - Date.now()));
+      const { connection, identity } = await HostConnection.open(options.socketPath, Math.max(1, deadline - Date.now()));
       try {
-        const connectedSocket = await socketIdentity(options.socketPath);
-        if (connectedSocket.dev !== startingSocket.dev || connectedSocket.ino !== startingSocket.ino) {
+        if (identity.dev !== startingSocket.dev || identity.ino !== startingSocket.ino) {
           throw new Error("Launched RPC socket identity changed while connecting");
         }
-        const response = await connection.request({ type: "get_state" });
-        if (!response.success || response.command !== "get_state") {
-          throw new Error("Launched RPC host did not confirm its session identity");
-        }
-        const state = response.data as HostState;
-        if (state.adapterOwnerPid !== child.pid) throw new Error("Endpoint does not belong to the launched pipe owner");
-        if (path.resolve(state.sessionFile!) !== path.resolve(options.sessionFile)) {
+        if (identity.ownerPid !== child.pid) throw new Error("Endpoint does not belong to the launched pipe owner");
+        if (path.resolve(identity.sessionFile) !== path.resolve(options.sessionFile)) {
           throw new Error("Launched RPC host identified a different session file");
         }
         if (failure) throw failure;
-        if (!Number.isSafeInteger(state.hostPid) || state.hostPid < 1) throw new Error("OMP host did not receive a process id");
-        return { pid: state.hostPid };
+        return { pid: identity.pid };
       } finally { await connection.close(); }
     }
     throw new Error(`OMP host startup timed out; see ${options.logPath}`);

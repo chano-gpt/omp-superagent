@@ -19,14 +19,25 @@ const env = {
   PATH: [dirname(process.execPath), process.env.PATH].filter(Boolean).join(delimiter),
   OMP_SUPERAGENT_NATIVE_TEST: "1",
   OMP_SUPERAGENT_SETUP_PTY_TEST: "1",
+  OMP_SUPERAGENT_GATEWAY_DIFFERENTIAL: "1",
   OMP_TEST_COMMAND: JSON.stringify(command),
   OMP_TEST_NATIVES_DIR: nativesDir,
   OMP_TEST_ULW_EXTENSION: resolve(ulw, manifest.omp.extensions[0]!),
 };
 console.log(`CI: Bun ${Bun.version}; ULW ${ulw}`);
-for (const args of [["run", "check"], ["test", "test"]]) {
-  const child = Bun.spawn([process.execPath, "--no-env-file", ...args], {
-    cwd: root, env, stdin: "ignore", stdout: "inherit", stderr: "inherit",
+const bun = [process.execPath, "--no-env-file"];
+const commands = [
+  [...bun, "run", "check"],
+  [...bun, "run", "build:native"],
+  ["cargo", "build", "--locked", "--manifest-path", "gateway/Cargo.toml",
+    "--example", "gateway-differential", "--example", "gateway-lifecycle-fixture"],
+  [...bun, "test", "test"],
+];
+for (const command of commands) {
+  const child = Bun.spawn(command, {
+    cwd: root,
+    env,
+    stdin: "ignore", stdout: "inherit", stderr: "inherit",
   });
   const code = await child.exited;
   if (code !== 0) { process.exitCode = code; break; }

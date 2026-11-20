@@ -1,0 +1,263 @@
+{
+  "first": {
+    "busy": {
+      "command": "get_state",
+      "data": {
+        "adapterOwnerPid": "$owner",
+        "adapterProtocol": "owned-stock-stdio-v1",
+        "admitted": false,
+        "fixtureAskDialog": true,
+        "fixtureNativeProtocol": 2,
+        "generation": 1,
+        "goal": null,
+        "hasOwnedRunningWork": false,
+        "hasPendingAsyncWork": false,
+        "hostPid": "$native",
+        "instanceKey": "$instance",
+        "isCompacting": false,
+        "isSettled": false,
+        "isStreaming": true,
+        "modelSettings": {
+          "defaultThinkingLevel": "high",
+          "modelRoles": {}
+        },
+        "mutationHeld": false,
+        "pendingUiRequests": [],
+        "postPromptWork": false,
+        "queuedMessageCount": 0,
+        "sessionFile": "$session-file",
+        "sessionId": "4c73d767-0a25-4c61-9341-f89bb272e76e",
+        "settingsScope": "session"
+      },
+      "id": "first:get_state:5",
+      "success": true,
+      "type": "response"
+    },
+    "initial": {
+      "command": "get_state",
+      "data": {
+        "adapterOwnerPid": "$owner",
+        "adapterProtocol": "owned-stock-stdio-v1",
+        "admitted": false,
+        "fixtureAskDialog": true,
+        "fixtureNativeProtocol": 2,
+        "generation": 1,
+        "goal": null,
+        "hasOwnedRunningWork": false,
+        "hasPendingAsyncWork": false,
+        "hostPid": "$native",
+        "instanceKey": "$instance",
+        "isCompacting": false,
+        "isSettled": true,
+        "isStreaming": false,
+        "modelSettings": {
+          "defaultThinkingLevel": "high",
+          "modelRoles": {}
+        },
+        "mutationHeld": false,
+        "pendingUiRequests": [],
+        "postPromptWork": false,
+        "queuedMessageCount": 0,
+        "sessionFile": "$session-file",
+        "sessionId": "4c73d767-0a25-4c61-9341-f89bb272e76e",
+        "settingsScope": "session"
+      },
+      "id": "first:get_state:3",
+      "success": true,
+      "type": "response"
+    },
+    "negotiated": {
+      "command": "negotiate_protocol",
+      "data": {
+        "protocolVersion": 2
+      },
+      "id": "first:negotiate_protocol:2",
+      "success": true,
+      "type": "response"
+    },
+    "ready": {
+      "maxFrameBytes": 1048576,
+      "maxReassembledFrameBytes": 67108864,
+      "protocolVersion": 1,
+      "supportedProtocolVersions": [
+        1,
+        2
+      ],
+      "type": "ready"
+    },
+    "refused": {
+      "code": "session_busy",
+      "command": "shutdown_host",
+      "error": "Host is busy (session_busy)",
+      "id": "first:shutdown_host:6",
+      "success": false,
+      "type": "response"
+    },
+    "setBusy": {
+      "command": "fixture_set_busy",
+      "data": {
+        "busy": true
+      },
+      "id": "first:fixture_set_busy:4",
+      "success": true,
+      "type": "response"
+    },
+    "unsupported": {
+      "command": "negotiate_protocol",
+      "error": "Unsupported adapter protocol",
+      "id": "first:negotiate_protocol:1",
+      "success": false,
+      "type": "response"
+    }
+  },
+  "second": {
+    "admission": {
+      "command": "get_host_admission",
+      "data": {
+        "fenced": false,
+        "generation": 0,
+        "pendingGoalResumes": []
+      },
+      "id": "second:get_host_admission:5",
+      "success": true,
+      "type": "response"
+    },
+    "big": {
+      "command": "get_fixture_large",
+      "data": {
+        "emitted": true
+      },
+      "id": "second:get_fixture_large:6",
+      "success": true,
+      "type": "response"
+    },
+    "idle": {
+      "command": "get_state",
+      "data": {
+        "adapterOwnerPid": "$owner",
+        "adapterProtocol": "owned-stock-stdio-v1",
+        "admitted": false,
+        "fixtureAskDialog": true,
+        "fixtureNativeProtocol": 2,
+        "generation": 1,
+        "goal": null,
+        "hasOwnedRunningWork": false,
+        "hasPendingAsyncWork": false,
+        "hostPid": "$native",
+        "instanceKey": "$instance",
+        "isCompacting": false,
+        "isSettled": true,
+        "isStreaming": false,
+        "modelSettings": {
+          "defaultThinkingLevel": "high",
+          "modelRoles": {}
+        },
+        "mutationHeld": false,
+        "pendingUiRequests": [],
+        "postPromptWork": false,
+        "queuedMessageCount": 0,
+        "sessionFile": "$session-file",
+        "sessionId": "4c73d767-0a25-4c61-9341-f89bb272e76e",
+        "settingsScope": "session"
+      },
+      "id": "second:get_state:4",
+      "success": true,
+      "type": "response"
+    },
+    "large": {
+      "type": "fixture_large",
+      "unicode": {
+        "bytes": 1305000,
+        "sha256": "36d8ed470dbaa300724d1f3fabd9884becfbb68f50df6f99869dfd36ca55c844"
+      }
+    },
+    "ready": {
+      "maxFrameBytes": 1048576,
+      "maxReassembledFrameBytes": 67108864,
+      "protocolVersion": 1,
+      "supportedProtocolVersions": [
+        1,
+        2
+      ],
+      "type": "ready"
+    },
+    "reattached": {
+      "command": "get_state",
+      "data": {
+        "adapterOwnerPid": "$owner",
+        "adapterProtocol": "owned-stock-stdio-v1",
+        "admitted": false,
+        "fixtureAskDialog": true,
+        "fixtureNativeProtocol": 2,
+        "generation": 1,
+        "goal": null,
+        "hasOwnedRunningWork": false,
+        "hasPendingAsyncWork": false,
+        "hostPid": "$native",
+        "instanceKey": "$instance",
+        "isCompacting": false,
+        "isSettled": false,
+        "isStreaming": true,
+        "modelSettings": {
+          "defaultThinkingLevel": "high",
+          "modelRoles": {}
+        },
+        "mutationHeld": false,
+        "pendingUiRequests": [],
+        "postPromptWork": false,
+        "queuedMessageCount": 0,
+        "sessionFile": "$session-file",
+        "sessionId": "4c73d767-0a25-4c61-9341-f89bb272e76e",
+        "settingsScope": "session"
+      },
+      "id": "second:get_state:2",
+      "success": true,
+      "type": "response"
+    },
+    "renegotiated": {
+      "command": "negotiate_protocol",
+      "data": {
+        "protocolVersion": 2
+      },
+      "id": "second:negotiate_protocol:1",
+      "success": true,
+      "type": "response"
+    },
+    "setIdle": {
+      "command": "fixture_set_busy",
+      "data": {
+        "busy": false
+      },
+      "id": "second:fixture_set_busy:3",
+      "success": true,
+      "type": "response"
+    },
+    "shutdown": {
+      "command": "shutdown_host",
+      "data": {
+        "shutdown": true
+      },
+      "id": "second:shutdown_host:7",
+      "success": true,
+      "type": "response"
+    }
+  },
+  "socket": {
+    "mode": 384,
+    "reattachedMode": 384
+  },
+  "terminal": {
+    "exitCode": 0,
+    "receipt": {
+      "code": 0,
+      "observationsFlushed": true,
+      "ownerPid": "$owner",
+      "persisted": true,
+      "pid": "$native",
+      "sessionFile": "$session-file",
+      "sessionId": "4c73d767-0a25-4c61-9341-f89bb272e76e",
+      "signal": null
+    },
+    "signal": null
+  }
+}

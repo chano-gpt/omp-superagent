@@ -1,0 +1,160 @@
+{
+  "attempted": {
+    "event": {
+      "approvalId": "native-approval:1",
+      "kind": "answer",
+      "response": {
+        "confirmed": true
+      },
+      "route": {
+        "accountId": "B1",
+        "authorityId": "T1",
+        "channelId": "D1",
+        "guildId": null,
+        "platform": "slack",
+        "threadId": null,
+        "topicId": "original"
+      }
+    },
+    "reconciliation": true,
+    "sequence": 1
+  },
+  "barrierStatus": {
+    "gateway": {
+      "admissionReady": false,
+      "pendingEvents": 4,
+      "ready": true,
+      "stopping": false,
+      "unresolvedEvents": 1
+    },
+    "head": {
+      "connected": true,
+      "ready": false
+    }
+  },
+  "callbackConflict": {
+    "admitted": false,
+    "conflict": true
+  },
+  "callbackRedelivery": {
+    "admitted": true
+  },
+  "closed": {
+    "pending": false
+  },
+  "final": {
+    "gateway": {
+      "admissionReady": true,
+      "pendingEvents": 0,
+      "ready": true,
+      "stopping": false,
+      "unresolvedEvents": 0
+    },
+    "head": {
+      "connected": true,
+      "ready": true
+    }
+  },
+  "firstDelivery": {
+    "event": {
+      "approvalId": "native-approval:1",
+      "kind": "answer",
+      "response": {
+        "confirmed": true
+      },
+      "route": {
+        "accountId": "B1",
+        "authorityId": "T1",
+        "channelId": "D1",
+        "guildId": null,
+        "platform": "slack",
+        "threadId": null,
+        "topicId": "original"
+      }
+    },
+    "sequence": 1
+  },
+  "following": {
+    "event": {
+      "input": {
+        "attachments": [],
+        "id": "slack:B1:D1:1750000000.000004",
+        "messageId": "1750000000.000004",
+        "receivedAt": 100,
+        "route": {
+          "accountId": "B1",
+          "authorityId": "T1",
+          "channelId": "D1",
+          "guildId": null,
+          "platform": "slack",
+          "threadId": null,
+          "topicId": "original"
+        },
+        "text": "keep ordering"
+      },
+      "kind": "message"
+    },
+    "sequence": 2
+  },
+  "held": {
+    "gateway": {
+      "admissionReady": true,
+      "pendingEvents": 1,
+      "ready": true,
+      "stopping": false,
+      "unresolvedEvents": 1
+    },
+    "head": {
+      "connected": false,
+      "ready": false
+    }
+  },
+  "priority": {
+    "event": {
+      "input": {
+        "attachments": [],
+        "id": "slack:B1:D1:1750000000.000005",
+        "messageId": "1750000000.000005",
+        "receivedAt": 100,
+        "route": {
+          "accountId": "B1",
+          "authorityId": "T1",
+          "channelId": "D1",
+          "guildId": null,
+          "platform": "slack",
+          "threadId": null,
+          "topicId": "original"
+        },
+        "text": "/stop head"
+      },
+      "kind": "message"
+    },
+    "sequence": 3
+  },
+  "quarantined": {
+    "gateway": {
+      "admissionReady": true,
+      "pendingEvents": 3,
+      "ready": true,
+      "stopping": false,
+      "unresolvedEvents": 1
+    },
+    "head": {
+      "connected": true,
+      "ready": false
+    }
+  },
+  "reconciliation": {
+    "event": {
+      "barrier": "$observed-barrier",
+      "kind": "reconnect"
+    },
+    "sequence": 4
+  },
+  "sameRoute": {
+    "pending": true
+  },
+  "wrongTopic": {
+    "pending": false
+  }
+}

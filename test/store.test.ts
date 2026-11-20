@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, Collection, type ClientUser, type Message } from "discord.js";
 import { physicalRouteKey, routeKey, type Approval, type Inbound, type Lane, type LaneModel, type Route } from "../src/contracts.ts";
-import { DiscordMessenger } from "../src/discord.ts";
+import { DiscordMessenger } from "./oracles/bun-gateway/discord.ts";
 import { Store } from "../src/store.ts";
 import type { LaneReport } from "../src/lane-report";
 import type { HeadRecoveryAttempt } from "../src/contracts";
@@ -82,6 +82,44 @@ function storedOutput(path: string, id: string): { state: string; remote_id: str
 }
 
 describe("durable coordination store", () => {
+  test("active queue filters keep durable order and exclude terminal work and other targets", () => {
+    const { store } = fixture();
+    const other = admitLane(store);
+    store.receive(inbound("first"), "main");
+    store.receive(inbound("other", other.route), other.id);
+    store.receive(inbound("legacy"), null);
+    store.receive(inbound("third"), "main");
+    store.receive(inbound("last"), "main");
+    store.submit("first", "native-first", 0);
+    store.settle("first", "uncertain");
+    store.submit("third", "native-third", 0);
+    store.settle("last", "cancelled");
+
+    expect(store.inputs("main").map(input => input.id)).toEqual(["first", "third"]);
+    expect(store.inputs(undefined, "pending").map(input => input.id)).toEqual([`source-${other.id}`, "other", "legacy"]);
+    expect(store.inputs("main", "submitted").map(input => input.id)).toEqual(["third"]);
+    expect(store.hasInput(other.id, "uncertain")).toBe(false);
+    expect(store.hasInput("main", "uncertain")).toBe(true);
+  });
+
+  test("native recovery only fences uncertain HEAD work with a nonempty original owner record", () => {
+    const { store } = fixture();
+    const other = admitLane(store);
+    store.receive(inbound("lane-owner", other.route), other.id, { "head-native-owner:lane-owner": "record" });
+    store.submit("lane-owner", "native-lane", 0);
+    store.settle("lane-owner", "uncertain");
+    store.receive(inbound("head-owner"), "main", { "head-native-owner:head-owner": "record" });
+    store.submit("head-owner", "native-head", 0);
+    expect(store.hasHeadRecoveryInput()).toBe(false);
+    store.settle("head-owner", "uncertain");
+    expect(store.hasHeadRecoveryInput()).toBe(true);
+    store.setMeta("head-native-owner:head-owner", "");
+    expect(store.hasHeadRecoveryInput()).toBe(false);
+    store.setMeta("head-native-owner:head-owner", "record");
+    store.settle("head-owner", "cancelled");
+    expect(store.hasHeadRecoveryInput()).toBe(false);
+  });
+
   function recovery(store: Store): HeadRecoveryAttempt {
     store.receive(inbound("recovery-original"), "main");
     store.submit("recovery-original", "original-rpc", 0);

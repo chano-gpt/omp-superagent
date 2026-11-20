@@ -8,12 +8,12 @@ import { authorizeDiscordPurpose, discordPurposeRequest } from "./discord-contex
 import { HEAD_MODEL_CONTROL, physicalRoute, physicalRouteKey, routeKey, type HeadModelChange } from "./contracts";
 import { authorizeRoute, credentialEnvNames, type Config, hostPaths, privateDirectory } from "./config";
 import { DeliveryError } from "./delivery";
-import { connect, type HostOptions, startHost } from "./host";
+import { HostConnection, type HostOptions, startHost } from "./host";
 import { compareMessageIds } from "./message-order";
 import { codingModels, isLaneModel, laneModelArgument, resolveLaneModelChoice, sameLaneModel, type LaneModelCandidate } from "./lane-models";
 import { advertisedWorkflow, headWorkflow, leadingWorkflow, workflowChoice, workflowContext, workflowPrompt } from "./workflow";
 import type { NativePresetInspection } from "./native-presets";
-import type { HeadInitialization } from "./gateway-server";
+import type { HeadInitialization } from "./gateway-wire";
 import { repositoryRoot } from "./repository";
 import { parseLaneReportResult } from "./lane-report";
 import type { HeadRecoveryAttempt, HeadRecoveryDecision } from "./contracts";
@@ -132,7 +132,7 @@ interface HeadRestart extends GatewayRestartRequest {
     goalSourceId?: string;
     goalId?: string;
     goalActive: boolean;
-    model: LaneModel | null;
+    model: (LaneModel & { reasoning?: boolean }) | null;
     thinkingLevel?: string;
     residents: Array<{
       id: string; generation: number; pid: number; sessionId: string;
@@ -144,6 +144,26 @@ interface HeadRestart extends GatewayRestartRequest {
     }>;
   };
 }
+
+function restartSelection({ model, thinkingLevel }: RuntimeState) {
+  return {
+    model: isLaneModel(model) ? { provider: model.provider, id: model.id,
+      ...("reasoning" in model && typeof model.reasoning === "boolean" ? { reasoning: model.reasoning } : {}) } : null,
+    thinkingLevel,
+  };
+}
+
+function matchesRestartSelection(checkpoint: NonNullable<HeadRestart["checkpoint"]>, state: RuntimeState): boolean {
+  const resumed = restartSelection(state);
+  if (!sameLaneModel(checkpoint.model, resumed.model)) return false;
+  if (checkpoint.thinkingLevel === resumed.thinkingLevel) return true;
+  // Stock OMP can omit effort on a fresh non-reasoning model and report "off"
+  // on resume. Never equate missing effort with "off" on a reasoning or unknown model.
+  return checkpoint.model?.reasoning === false && resumed.model?.reasoning === false
+    && ((checkpoint.thinkingLevel === undefined && resumed.thinkingLevel === "off")
+      || (checkpoint.thinkingLevel === "off" && resumed.thinkingLevel === undefined));
+}
+
 export interface LaneStart extends LaneModelChoice {
   sourceId: string;
   title: string;
@@ -267,7 +287,7 @@ export class Superagent {
     private readonly report: (error: unknown) => void = console.error,
     adapters: Partial<RuntimeAdapters> = {},
   ) {
-    this.adapters = { connect, startHost, readOmpUsage, ...adapters };
+    this.adapters = { connect: HostConnection.connectForActivity, startHost, readOmpUsage, ...adapters };
     this.prWatcher = new PrWatcher(store, config, adapters.readPrSnapshot);
     this.cronJobs = new CronJobs(store, config);
     // Adapters that do not consume the optional gate must not cause an unhandled
@@ -328,7 +348,7 @@ export class Superagent {
         const boundary = JSON.parse(stopBoundary) as { cancelledInputIds: string[] };
         for (const id of boundary.cancelledInputIds) this.store.settle(id, "cancelled");
       }
-      for (const input of this.store.inputs().filter(input => input.state === "submitted")) {
+      for (const input of this.store.inputs(undefined, "submitted")) {
         if (recovered.has(input.id)) continue;
         const owner = this.store.getMeta(`steering-owner:${input.id}`);
         this.store.settle(input.id, "uncertain", !owner || owner === input.id ? {
@@ -606,8 +626,8 @@ export class Superagent {
     const head = this.live.get("main");
     if (!head || !this.current(head) || head.preparing) return;
     const active = this.recoveryAttempt();
-    const candidates = active ? [] : this.store.inputs("main").filter(input => input.state === "uncertain"
-      && input.requestId && input.generation === head.generation
+    const candidates = active ? [] : this.store.inputs("main", "uncertain").filter(input =>
+      input.requestId && input.generation === head.generation
       && this.store.getMeta(`head-native-owner:${input.id}`) && !this.store.getMeta(`head:recovery:${input.id}`));
     if (!active && !candidates.length) return;
     const version = head.nativeVersion;
@@ -1262,7 +1282,7 @@ export class Superagent {
       name: workflow, reason: "Original authorized user's leading workflow invocation", sourceId: input.id, provenance: "user",
     } : null)) return;
     this.remember(input);
-    if (this.settleTopicControl(input)) { this.background(this.kick()); return; }
+    if (this.settleTopicControl(input, bound)) { this.background(this.kick()); return; }
     const command = input.text.trim();
     const control = this.headCommand(this.store.input(input.id)!);
     if (control?.name === "cron") {
@@ -1278,14 +1298,15 @@ export class Superagent {
       }
       this.controls.add(input.id);
       if (control.name === "stop") {
+        const target = this.stopTarget(input, control, bound);
         const restart = this.restartFence();
-        if (restart && this.stopTarget(this.store.input(input.id)!, control) === "main"
+        if (restart && target === "main"
           && !["handoff", "accepted", "uncertain"].includes(restart.state)) {
           this.store.settle(restart.inputId, "cancelled");
           this.saveRestart({ ...restart, state: "refused" }, false);
           this.restartResult(restart, "Explicit HEAD stop superseded restart before lifecycle handoff. No successor was authorized.");
         }
-        if (!this.restartFence()) this.admitStop(this.store.input(input.id)!, control);
+        if (!this.restartFence()) this.admitStop(this.store.input(input.id)!, target);
       }
       // Read-only controls must not queue behind an unrelated slow catalog read.
       // Mutations still use pump's existing serialized path; stops own their tail.
@@ -1329,11 +1350,12 @@ export class Superagent {
   private boundLane(route: Route): Lane | null {
     const direct = this.store.laneForRoute(route);
     if (direct) return direct;
-    const stored = this.store.getMeta(`topic-binding:${routeKey(route)}`);
+    const identity = routeKey(route);
+    const stored = this.store.getMeta(`topic-binding:${identity}`);
     if (!stored) return null;
     const binding = JSON.parse(stored) as { source: Route; destination: Route; laneId: string };
     const lane = this.store.lane(binding.laneId);
-    if (!lane || routeKey(binding.source) !== routeKey(route) || routeKey(binding.destination) !== routeKey(lane.route)) {
+    if (!lane || routeKey(binding.source) !== identity || routeKey(binding.destination) !== routeKey(lane.route)) {
       throw new Error("Invalid logical topic context binding");
     }
     return lane;
@@ -1490,7 +1512,7 @@ export class Superagent {
     return this.isDm(input.route) ? input.text.trim().replace(/^\/new(?:\s+|$)/, "") : input.text;
   }
 
-  private settleTopicControl(input: Inbound): boolean {
+  private settleTopicControl(input: Inbound, bound?: Lane | null): boolean {
     if (this.store.getMeta(`dm:control-edit:${input.id}`) === "true") {
       this.store.settle(input.id, "done", {
         id: `${input.id}:topic`,
@@ -1499,7 +1521,8 @@ export class Superagent {
       return true;
     }
     const command = input.text.trim();
-    if (command === "/resume" && this.store.getMeta(`user-source:${input.id}`) === "true" && !this.boundLane(input.route)) {
+    if (command === "/resume" && this.store.getMeta(`user-source:${input.id}`) === "true"
+      && !(bound === undefined ? this.boundLane(input.route) : bound)) {
       this.store.settle(input.id, "done", {
         id: `${input.id}:control`, text: "이 대화에 연결된 레인이 없습니다. 재개할 레인의 대화에서 /resume을 사용해 주세요.",
       });
@@ -2283,7 +2306,7 @@ export class Superagent {
       if (input.id === beforeInputId) earlier = false;
       if (input.state === "uncertain" && (earlier || active?.has(input.id))) uncertainInputIds.push(input.id);
     }
-    const kickoff = this.kickoffHold(inputs);
+    const kickoff = this.store.kickoffHold(id);
     return { runtimeBlocked: this.blocked.has(id), uncertainInputIds, ...(kickoff ? { kickoff } : {}) };
   }
 
@@ -2451,10 +2474,10 @@ export class Superagent {
     if (input.id.startsWith("head-model:") && this.store.getMeta(HEAD_MODEL_CONTROL) === input.id) {
       return { name: "model", argument: input.text };
     }
-    if (this.store.getMeta(`user-source:${input.id}`) !== "true"
-      || this.store.getMeta(`handoff-source:${input.id}`)) return null;
     const match = /^\/(help|status|stop|restart|context|compact|usage|model|effort|resolve|cron)(?:\s+([\s\S]*))?$/.exec(input.text.trim());
-    return match ? { name: match[1] as HeadCommand["name"], argument: (match[2] ?? "").trim() } : null;
+    if (!match || this.store.getMeta(`user-source:${input.id}`) !== "true"
+      || this.store.getMeta(`handoff-source:${input.id}`)) return null;
+    return { name: match[1] as HeadCommand["name"], argument: (match[2] ?? "").trim() };
   }
 
   private restartFence(): HeadRestart | null {
@@ -2569,8 +2592,7 @@ export class Superagent {
       restart = { ...restart, checkpoint: {
         goalActive: before.goal?.enabled === true && before.goal.goal?.status === "active",
         goalSourceId: this.headGoalSource(head, before.goal?.goal?.id)?.id, goalId: before.goal?.goal?.id,
-        model: isLaneModel(before.model) ? { provider: before.model.provider, id: before.model.id } : null,
-        thinkingLevel: before.thinkingLevel, residents,
+        ...restartSelection(before), residents,
       } };
       this.assertRestartCurrent(restart);
       this.saveRestart(restart);
@@ -2642,10 +2664,7 @@ export class Superagent {
     this.assertRestartCurrent(restart);
     const checkpoint = restart.checkpoint;
     if (!checkpoint) throw new Error("Restart checkpoint identity was not recorded");
-    restart = { ...restart, checkpoint: { ...checkpoint,
-      model: isLaneModel(actual.model) ? { provider: actual.model.provider, id: actual.model.id } : null,
-      thinkingLevel: actual.thinkingLevel,
-    } };
+    restart = { ...restart, checkpoint: { ...checkpoint, ...restartSelection(actual) } };
     this.saveRestart(restart);
     if (actual.modelSettings) {
       const settingsKey = `head:model-settings:${head.sessionId}`;
@@ -2969,8 +2988,7 @@ export class Superagent {
         && !this.pidAlive(receipt.gatewayPid);
       if (!replacement) return;
       if (receipt.state === "started" && this.initialization?.state === "complete" && this.initialization.sessionId === actual.sessionId) {
-        if (restart.checkpoint && (!sameLaneModel(restart.checkpoint.model, actual.model)
-          || restart.checkpoint.thinkingLevel !== actual.thinkingLevel)) {
+        if (restart.checkpoint && !matchesRestartSelection(restart.checkpoint, actual)) {
           this.saveRestart({ ...restart, state: "failed" });
           this.restartResult(restart, "Replacement HEAD model/effort differs from its checkpoint. Intake remains held; inspect session settings. No goal or prompt was replayed.");
           return;
@@ -3115,17 +3133,16 @@ export class Superagent {
     return [...new Set(data.levels as string[])];
   }
 
-  private stopTarget(input: InputRecord, command: HeadCommand): string | null {
+  private stopTarget(input: Inbound, command: HeadCommand, bound?: Lane | null): string | null {
     const admitted = this.store.getMeta(`head:stop-target:${input.id}`);
     if (admitted !== null) return JSON.parse(admitted) as string | null;
     if (command.argument && !/^(?:head|\S+)$/.test(command.argument)) return null;
     if (command.argument === "head") return "main";
     if (command.argument) return this.store.lane(command.argument)?.id ?? null;
-    return this.boundLane(input.route)?.id ?? "main";
+    return (bound === undefined ? this.boundLane(input.route) : bound)?.id ?? "main";
   }
 
-  private admitStop(input: InputRecord, command: HeadCommand): void {
-    const target = this.stopTarget(input, command);
+  private admitStop(input: InputRecord, target: string | null): void {
     this.store.setMeta(`head:stop-target:${input.id}`, JSON.stringify(target));
     if (target !== "main") return;
     this.headStopping++;
@@ -3168,8 +3185,7 @@ export class Superagent {
     this.store.submit(input.id, `sg-stop-${key(input.id)}`, head?.generation ?? Number(this.store.getMeta("main:generation") ?? "0"));
   }
 
-  private async stopControl(input: InputRecord, command: HeadCommand): Promise<void> {
-    const target = this.stopTarget(input, command);
+  private async stopControl(input: InputRecord, target: string | null): Promise<void> {
     if (!target) {
       this.controlReply(input, "Invalid stop target. Use /stop, /stop head or /stop <actual managed lane-id> with no extra arguments; nothing was sent to a model.", "cancelled");
       return;
@@ -3186,7 +3202,7 @@ export class Superagent {
       return;
     }
     // Pending controls recovered from disk have not passed receive's priority admission.
-    if (this.store.input(input.id)?.state === "pending") this.admitStop(input, command);
+    if (this.store.input(input.id)?.state === "pending") this.admitStop(input, target);
     const operation = this.headStopTail.catch(() => {}).then(async () => {
       const failures: unknown[] = [];
       try {
@@ -3325,7 +3341,7 @@ export class Superagent {
     this.background(this.kick().catch(this.report));
   }
 
-  private async headControl(input: InputRecord, command: HeadCommand, earlierMain: boolean): Promise<void> {
+  private async headControl(input: InputRecord, command: HeadCommand, earlierMain: boolean, stopTarget?: string): Promise<void> {
     if (command.name === "cron") { this.cronControl(input.id, command.argument); return; }
     if (command.name === "usage") {
       if (command.argument) {
@@ -3355,7 +3371,7 @@ export class Superagent {
       const scope = presetCommand?.global ? "HEAD preset command (existing lanes unchanged)." : "HEAD session only (not lanes or global defaults).";
       this.store.settle(input.id, outcome, { id: `${input.id}:head-control`, text: `${scope} ${text}` });
     };
-    if (command.name === "stop") { await this.stopControl(input, command); return; }
+    if (command.name === "stop") { await this.stopControl(input, stopTarget ?? this.stopTarget(input, command)); return; }
     if (command.name === "resolve") { this.resolveControl(input, command); return; }
     if (presetCommand?.error) { reply(presetCommand.error, "cancelled"); return; }
     const mutation = !this.readOnlyHeadCommand(command);
@@ -3535,18 +3551,8 @@ export class Superagent {
     await this.pumping;
   }
 
-  private kickoffHold(inputs: readonly InputRecord[]) {
-    for (const input of inputs) {
-      const outputId = this.store.getMeta(`kickoff-output:${input.id}`);
-      if (outputId === null) continue;
-      const state = this.store.output(outputId)?.state ?? "missing";
-      if (state !== "sent") return { outputId, state };
-    }
-    return null;
-  }
-
   private kickoffHeld(target: string): boolean {
-    return this.kickoffHold(this.store.inputs(target)) !== null;
+    return this.store.kickoffHold(target) !== null;
   }
 
   private pendingHeadModel(exceptId?: string): InputRecord | undefined {
@@ -3578,8 +3584,8 @@ export class Superagent {
             }
           }
         }
-        for (const input of this.store.inputs()) {
-          if (this.stopped || input.state !== "pending") continue;
+        for (const input of this.store.inputs(undefined, "pending")) {
+          if (this.stopped) continue;
           try { this.authorized(input.route); }
           catch {
             this.store.settle(input.id, "cancelled");
@@ -3600,7 +3606,7 @@ export class Superagent {
             continue;
           }
           if (control?.name === "stop" && !this.controls.has(input.id) && this.stopTarget(input, control) === "main") {
-            await this.headControl(input, control, false);
+            await this.headControl(input, control, false, "main");
             continue;
           }
           // Legacy unassigned intake is still user work: migrate only to head.
@@ -3612,6 +3618,9 @@ export class Superagent {
         }
         const heldTargets = new Set<string>();
         const earlierMain = new Set<string>();
+        // A held target can skip consecutive inputs without re-reading its
+        // fence. No kickoff cache survives a command, preparation or dispatch.
+        const heldKickoffs = new Set<string>();
         const inputs = this.store.inputs();
         const deferredId = this.store.getMeta(HEAD_MODEL_CONTROL);
         const deferred = inputs.find(input => input.id === deferredId);
@@ -3631,6 +3640,7 @@ export class Superagent {
                 const state = this.store.input(id)?.state;
                 return state === "pending" || state === "submitted" || state === "uncertain";
               });
+            heldKickoffs.clear();
             await this.headControl(input, command, unresolved);
             if (this.store.input(input.id)?.state === "uncertain") heldTargets.add("main");
             earlierMain.add(input.id);
@@ -3640,7 +3650,9 @@ export class Superagent {
           if (input.target === "main" && (this.headRecoveryActive() || this.initializationHoldsHead() || this.headStopping > 0 || this.headCompaction || this.pendingHeadModel())) continue;
           if (this.modelChanges.has(input.target)) continue;
           if (this.blocked.has(input.target)) continue;
-          if (this.kickoffHeld(input.target)) continue;
+          if (heldKickoffs.has(input.target)) continue;
+          if (this.kickoffHeld(input.target)) { heldKickoffs.add(input.target); continue; }
+          heldKickoffs.clear();
           // A settled Host does not resolve an earlier ambiguous submission.
           // Keep later requests behind the same target's durable uncertainty;
           // pause/resume cannot implicitly clear that original receipt.
@@ -3839,7 +3851,8 @@ export class Superagent {
     }
     const actual = modelState ?? await this.state(live);
     if (this.restartFence()) return;
-    if (!this.current(live) || live.input !== owner || this.store.input(input.id)?.state !== "pending") return;
+    const pending = this.store.input(input.id);
+    if (!this.current(live) || live.input !== owner || pending?.state !== "pending" || pending.target !== live.id) return;
     if (this.modelChanges.has(live.id) || live.id === "main" && (this.headStopping > 0 || this.headCompaction)
       || live.id !== "main" && this.requireLane(live.id).workState !== "open") return;
     if (this.store.input(source.id)?.state === "cancelled") {
@@ -3852,7 +3865,6 @@ export class Superagent {
       live.busy = !actual.isSettled;
       return;
     }
-    if (this.kickoffHeld(live.id)) return;
     const requestId = `sg-${key(input.id)}-${live.generation}`;
     if (live.id === "main" && !steering) {
       const version = live.nativeVersion;
@@ -3870,16 +3882,17 @@ export class Superagent {
           return;
         }
       }
+      const confirmedInput = this.store.input(input.id);
       if (!this.current(live) || live.input !== owner || version !== live.nativeVersion
         || !confirmed.isSettled || confirmed.isStreaming || confirmed.isCompacting
         || confirmed.pendingUiRequests?.length || this.store.approvals("main").length
         || this.restartFence() || this.headRecoveryActive() || this.headStopping || this.headCompaction || this.pendingHeadModel()
-        || this.store.input(input.id)?.state !== "pending") return;
+        || confirmedInput?.state !== "pending" || confirmedInput.target !== live.id || this.kickoffHeld(live.id)) return;
       this.store.setMeta(`head-native-owner:${input.id}`, JSON.stringify({
         requestId, generation: live.generation, sessionId: live.sessionId,
         sessionFile: confirmed.sessionFile, cursor: journal.leafId,
       }));
-    }
+    } else if (this.kickoffHeld(live.id)) return;
     this.store.setMeta(`steering-owner:${input.id}`, steering ? owner!.id : input.id);
     if (!this.store.submit(input.id, requestId, live.generation)) return;
     const submitted = { ...input, requestId, generation: live.generation, state: "submitted" as const };
@@ -3997,15 +4010,14 @@ export class Superagent {
 
   private observe(live: Live, frame: Record<string, unknown>): void {
     if (!this.current(live)) return;
+    // Managed host_message_update_activity ticks contribute only this heartbeat.
     live.lastActivity = Date.now();
     if (frame.type === "agent_start" || frame.type === "agent_end" || frame.type === "message_end"
       || frame.type === "prompt_result" || frame.type === "session_settled") {
       live.nativeVersion++;
       if (live.finishing) live.finishAgain = true;
     }
-    if (live.id === "main" && (this.headRecoveryActive()
-      || this.store.inputs("main").some(input => input.state === "uncertain"
-        && !!this.store.getMeta(`head-native-owner:${input.id}`)))) {
+    if (live.id === "main" && (this.headRecoveryActive() || this.store.hasHeadRecoveryInput())) {
       // Native journal evidence owns reconciliation. Delayed original frames
       // and recovery messages never become progress/answers for live.input.
       if (frame.type === "prompt_result" || frame.type === "agent_end" || frame.type === "session_settled")
@@ -4125,9 +4137,7 @@ export class Superagent {
   private async finishOnce(live: Live): Promise<void> {
     if (!this.ready || !this.current(live) || live.preparing) return;
     await this.finishBootstrap(live);
-    if (live.id === "main" && (this.headRecoveryActive()
-      || this.store.inputs("main").some(input => input.state === "uncertain"
-        && !!this.store.getMeta(`head-native-owner:${input.id}`)))) {
+    if (live.id === "main" && (this.headRecoveryActive() || this.store.hasHeadRecoveryInput())) {
       await this.flushOutputs();
       await this.reconcileHeadRecovery();
       return;
@@ -4256,7 +4266,7 @@ export class Superagent {
     if (persisted?.state === "answered") return;
     if (persisted && persisted.state !== "pending") { live.connection.uiResponse(frame.id, { cancelled: true }); return; }
     const route = persisted?.route ?? live.input?.route ?? this.store.lane(live.id)?.route;
-    if (!route && live.id === "main" && this.store.inputs("main").some(input => input.state === "uncertain")) return;
+    if (!route && live.id === "main" && this.store.hasInput("main", "uncertain")) return;
     if (!route && live.id === "main" && frame.secret !== true) {
       // Native-only setup dialogs have no messenger destination. Retain them
       // across reconnect/restart as well, before startup reads the saved fence.

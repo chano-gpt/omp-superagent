@@ -6,11 +6,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, type Config } from "../../src/config";
 import type { GatewayRestartRecord, Inbound, Messenger, Route } from "../../src/contracts";
-import { startGateway, type GatewayOptions } from "../../src/gateway";
+import { startGateway, type GatewayOptions } from "../oracles/bun-gateway/gateway";
 import { gatewayCall, gatewayPaths } from "../../src/gateway-protocol";
-import { processAlive, type RestartPlan } from "../../src/gateway-restart";
-import type { GatewayStatus } from "../../src/gateway-server";
-import { prepareHostFixture, stopHostFixtures } from "./host-fixture-processes";
+import { processAlive, type RestartPlan } from "../oracles/bun-gateway/gateway-restart";
+import type { GatewayStatus } from "../../src/gateway-wire";
+import { stopHostFixtures } from "./host-fixture-processes";
 import { writeStockHostExecutable } from "./stock-host";
 
 // Match the actual operation windows (host owner exit, restart preparation,
@@ -83,7 +83,6 @@ export async function configFixture() {
     await rm(root, { recursive: true, force: true });
   });
   await chmod(root, 0o700);
-  await prepareHostFixture(root);
   const path = join(root, "config.json");
   const executable = join(root, "omp.ts");
   await writeStockHostExecutable(executable, `

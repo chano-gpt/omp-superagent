@@ -4,8 +4,8 @@
 
 ## Transport and identity
 
-The [Gateway](../../src/gateway.ts) owns credentials, the
-[adapter hub](../../src/messengers.ts), remote connections and authenticated
+The [native Gateway](../../gateway/src/main.rs) owns credentials, the
+[adapter hub](../../gateway/src/adapter.rs), remote connections and authenticated
 messenger effects. At least one adapter is required; all configured adapters run
 together. The [head runtime](../../src/runtime.ts) owns conversation routing and
 approval handling. It uses the Gateway's typed local Messenger interface, not
@@ -19,9 +19,9 @@ topic is a binding key, not a fabricated conversation or thread ID.
 
 | Adapter | Authentication and recovery boundary |
 | --- | --- |
-| [Discord](../../src/discord.ts) | discord.js verifies the bot/owner and configured guild and parent-channel allowlists; owner one-to-one DMs are separately allowed. History recovery is for known routes after their saved cursors, not unseen chats or all edits/deletions. |
-| [Telegram](../../src/telegram.ts) | grammY `getMe` identifies the bot. Use the configured real owner and allowed chats; anonymous, forwarded, bot-mediated and business identities do not confer authority. Long poll only after startup approval reconciliation; refuse an active webhook without removing it. |
-| [Slack](../../src/slack.ts) | Official Socket Mode and Web SDKs, with bot/workspace and active human owner checks and actual channel membership. No group DMs or public HTTP endpoint. Known-route history is limited by cursors, scopes, membership, retention and rate limits. |
+| [Discord](../../gateway/src/discord.rs) | Discord Gateway and REST verify the bot/owner and configured guild and parent-channel allowlists; owner one-to-one DMs are separately allowed. History recovery is for known routes after their saved cursors, not unseen chats or all edits/deletions. |
+| [Telegram](../../gateway/src/telegram.rs) | Bot API `getMe` identifies the bot. Use the configured real owner and allowed chats; anonymous, forwarded, bot-mediated and business identities do not confer authority. Long poll only after startup approval reconciliation; refuse an active webhook without removing it. |
+| [Slack](../../gateway/src/slack.rs) | Socket Mode and the Web API, with bot/workspace and active human owner checks and actual channel membership. No group DMs or public HTTP endpoint. Known-route history is limited by cursors, scopes, membership, retention and rate limits. |
 
 ## Durable admission and recovery
 
@@ -50,7 +50,7 @@ sequenceDiagram
 
 Gateway admission, platform ACK, head receipt, native prompt admission, native
 settlement, task acceptance, and external delivery are separate facts. The
-[Gateway ledger](../../src/gateway-store.ts) persists before ACK or cursor
+[Gateway ledger](../../gateway/src/store.rs) persists before ACK or cursor
 advancement and before handing the event to the head; these two paths do not
 wait for each other. The Gateway replays by stable identity. The head durably
 deduplicates the original event and any distinct edit revision. A permanent denial
@@ -199,13 +199,13 @@ approval.
   are local scoped context tied to a real owner input, not channel mutations
   or authority to choose a repository or dispatch work.
 - Resolve Telegram and Slack file references through original authorized
-  SDK routes and metadata. Do not persist or surface credential URLs or
+  API routes and metadata. Do not persist or surface credential URLs or
   follow redirects on private file downloads. Enforce byte limits end to end;
   an unknown size is not zero and a known size must match the bytes received.
   The adapters preserve audio metadata; they do not transcribe attachments.
 - Long outputs use a single bounded text attachment where supported. Slack
   uses upload URL → bytes → `files.completeUploadExternal`, not `files.upload`.
-  Telegram and Slack do not automatically retry SDK mutations. Discord formats
+  Telegram and Slack do not automatically retry remote mutations. Discord formats
   pipe tables as fixed-width code blocks at delivery, preserving the stored
   original. [Delivery classification](../../src/delivery.ts) distinguishes
   definite rejection from uncertainty across the IPC boundary.
@@ -217,14 +217,14 @@ approval.
 
 ## Discord voice
 
-[Discord voice](../../src/discord-voice.ts) is optional Gateway functionality,
+[Discord voice](../../gateway/src/discord_voice.rs) is optional Gateway functionality,
 separate from voice attachments or the head model. A fresh original owner
 `/voice start` in the configured text channel can open one bounded OpenAI Live
 conversation in the configured voice channel. Use channel permissions to
 exclude other participants. Edits, catch-up and restart cannot open or resume it.
 
-Subscription mode uses the local [Codex bridge](../../src/codex-live.ts) and
-WebRTC; API mode uses the separately billed [Live API](../../src/openai-live.ts).
+Subscription mode uses the local [Codex bridge](../../src/codex-live-bridge.py) and
+WebRTC; API mode uses the separately billed OpenAI Live API.
 Subscription rejection or connection loss never falls back to API billing or
 retries automatically. Live answers ordinary conversation. For explicit work
 requests it produces a text draft of the owner's speech, not a second task

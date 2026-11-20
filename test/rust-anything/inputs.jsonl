@@ -1,0 +1,2 @@
+{"name":"clean-terminal","args":["clean"]}
+{"name":"nonzero-native-terminal","args":["child-nonzero"]}

@@ -72,9 +72,24 @@ shutdown. Do not infer eligibility from `agent_end`, an RPC disconnect, a saved
 file, or a lease alone. Release ownership and the slot only after actual native
 exit; a shutdown ACK is not exit. Reload the same native session when authorized.
 
-The stdio owner uses the stock RPC frame codec for ordinary traffic. It loads
-the larger stock RPC-mode module only when an `abort_and_restore_queue` request
-needs its bounded response builder, before withdrawing any queued input.
+The resident Rust owner speaks the stock JSONL/v2 protocol. Bun and the published SDK still
+prepare and publish the native session under its exact profile. The owner invokes short-lived
+SDK helpers for operations that depend on stock semantics, including fitting a withdrawn
+queue and verifying journal persistence after exit. No second Bun runtime stays resident per Host.
+Gateway supervision reads the exact session, process and socket identity from a fresh handshake
+instead of fetching the same full state again on the new connection.
+
+The stock CLI emits its ordinary full stream by default. The public `set_event_filter` still has
+the scope of the installed CLI. Superagent does not change it implicitly. On its own connection the
+managed controller negotiates `activity-v1`: each incremental text, thinking or tool-call update becomes
+one ordered activity frame instead of repeating the accumulated payload. The reduction is on that socket,
+not the native pipe or the owner's observation queue. Terminal messages, prompt results, approvals and
+lifecycle events retain their contents. The
+[recorded RPC oracle](../../test/rust-anything/) covers two synthetic native exits, including
+readiness, busy refusal, detach/reconnect and a chunked Unicode event. From a source checkout,
+build the owner and run `rust-anything app replay test/rust-anything` with
+[rust-anything 2.1.0](https://github.com/erkamyaman/rust-anything/tree/71c78e10c5beb39acecd52c2eb3f675a199f3cea).
+This compares against the Bun owner's recorded behavior; it does not replace the stock CLI lifecycle tests.
 
 The [Host extension](../../src/host-extension.ts) uses the exact registered
 `AgentSession` and native persistence/lifecycle guards. Use native `wakeSources`

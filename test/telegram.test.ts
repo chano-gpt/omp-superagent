@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Message, Update } from "grammy/types";
-import { TelegramMessenger, telegramDeliveryError } from "../src/telegram.ts";
+import { TelegramMessenger, telegramDeliveryError } from "./oracles/bun-gateway/telegram.ts";
 import { DeliveryError } from "../src/delivery.ts";
 import { decisionId } from "../src/decisions";
 import { Store } from "../src/store.ts";
@@ -10,10 +10,11 @@ import type { Approval, DialogResponse, Inbound, OutputRecord, Route } from "../
 import { type Config, hostPaths } from "../src/config.ts";
 import { createGatewayMessenger } from "../src/gateway-client.ts";
 import { gatewayPaths } from "../src/gateway-protocol.ts";
-import { GatewayServer, type GatewayStatus } from "../src/gateway-server.ts";
-import { GatewayStore } from "../src/gateway-store.ts";
+import { GatewayServer } from "./oracles/bun-gateway/gateway-server.ts";
+import type { GatewayStatus } from "../src/gateway-wire.ts";
+import { GatewayStore } from "./oracles/bun-gateway/gateway-store.ts";
 import { Superagent, type RuntimeHost, type RuntimeState } from "../src/runtime.ts";
-import { MessengerHub } from "../src/messengers.ts";
+import { MessengerHub } from "./oracles/bun-gateway/messengers.ts";
 import { MESSENGER_COMMANDS } from "../src/messenger-commands.ts";
 
 // These tests run the real grammY Api serializer/error boundary against an
@@ -89,6 +90,7 @@ class TelegramHttp {
   readonly failures = new Map<string, Array<ApiFailure | Error>>();
   webhook = "";
   chatIdentity: number | null = null;
+  chatReadGate?: Promise<void>;
   topicsEnabled = false;
   forum = true;
   filePath = "documents/file_1.txt";
@@ -136,6 +138,7 @@ class TelegramHttp {
     if (method === "getMe") result = { id: 900, is_bot: true, first_name: "Local Bot", username: "local_test_bot", has_topics_enabled: this.topicsEnabled };
     else if (method === "getWebhookInfo") result = { url: this.webhook, pending_update_count: 0 };
     else if (method === "getChat") {
+      if (this.chatReadGate) await this.chatReadGate;
       const id = this.chatIdentity ?? Number(payload.chat_id);
       result = id > 0 ? { id, type: "private", first_name: "Owner" } : { id, type: "supergroup", title: "Allowed", ...(this.forum ? { is_forum: true } : {}) };
     }
@@ -468,6 +471,27 @@ describe("Telegram identity, polling, and durable admission", () => {
 });
 
 describe("Telegram output, topics, and attachment credentials", () => {
+  test("overlapping sends share only the same physical route's pending authorization", async () => {
+    const { messenger, http } = await fixture();
+    const gate = Promise.withResolvers<void>();
+    http.chatReadGate = gate.promise;
+    const send = (text: string, target = group) => messenger.send({ ...output(text, target), id: text });
+    const pending = [send("first"), send("second"), send("topic", topic)];
+    gate.resolve();
+    const receipts = await Promise.all(pending);
+    expect(new Set(receipts).size).toBe(3);
+    expect(http.remote.get(Number(receipts[2]))?.message_thread_id).toBe(7);
+    expect(http.calls.filter(call => call.method === "getChat")).toHaveLength(2);
+
+    http.fail("getChat", { error_code: 403 });
+    await expect(send("revoked")).rejects.toMatchObject({ certainty: "rejected" });
+    expect(http.remote.size).toBe(3);
+
+    const restored = await send("restored");
+    expect(http.remote.get(Number(restored))?.text).toBe("restored");
+    expect(http.calls.filter(call => call.method === "getChat")).toHaveLength(4);
+  });
+
   test("voice notes preserve SDK duration and unknown size without conflating empty files", async () => {
     const { messenger, http, received } = await fixture();
     const voice = { file_id: "voice_1", file_unique_id: "voice_unique", duration: 2, mime_type: "audio/ogg" };

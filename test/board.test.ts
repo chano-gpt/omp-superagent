@@ -171,6 +171,7 @@ describe("shared durable bulletin board", () => {
     expect(reader.notices().map(item => item.id)).toEqual([root.id, sibling.id]);
     expect(reader.read({ limit: 1 }).map(item => item.id)).toEqual([root.id]);
     expect(reader.state().readCursor).toBe(root.id);
+    expect(reader.read({ channel: "general", thread: root.id })).toEqual([]);
     expect(reader.read({ thread: root.id }).map(item => item.id)).toEqual([sibling.id]);
     expect(reader.state().readCursor).toBe(own.id);
   });
@@ -197,16 +198,23 @@ describe("shared durable bulletin board", () => {
   test("sparse header receipts never lose lower unread posts when subscriptions change", () => {
     const f = fixture();
     const writer = f.open("lane-writer");
-    const reader = f.open("lane-reader");
+    const reader = f.open("lane-reader", "backfill-session");
     reader.subscribe([]);
     const earlier = writer.post("earlier", { text: "Not subscribed yet", channel: f.otherChannel });
-    const later = writer.post("later", { text: "Explicit mention", mentions: ["lane-reader"] });
-    expect(reader.notices().map(item => item.id)).toEqual([later.id]);
+    const read = writer.post("read", { text: "Already seen", channel: f.otherChannel });
+    const later = writer.post("later", { text: "Explicit mention", channel: f.otherChannel, mentions: ["lane-reader"] });
+    const newest = writer.post("newest", { text: "After the mention", channel: f.otherChannel });
+    expect(reader.notices(1).map(item => item.id)).toEqual([later.id]);
+    expect(reader.read({ channel: f.otherChannel, after: earlier.id, limit: 1 }).map(item => item.id)).toEqual([read.id]);
+    expect(reader.notices()).toEqual([]);
     expect(reader.state()).toMatchObject({ readCursor: 0, noticeCursor: later.id });
-    reader.subscribe([f.otherChannel]);
-    expect(reader.notices().map(item => item.id)).toEqual([earlier.id]);
-    expect(reader.state().noticeCursor).toBe(later.id);
-    expect(reader.read().map(item => item.id)).toEqual([earlier.id, later.id]);
+    reader.close();
+    const resumed = f.open("lane-reader", "backfill-session");
+    resumed.subscribe([f.otherChannel]);
+    expect(resumed.notices(1).map(item => item.id)).toEqual([earlier.id]);
+    expect(resumed.state().noticeCursor).toBe(later.id);
+    expect(resumed.notices().map(item => item.id)).toEqual([newest.id]);
+    expect(resumed.read().map(item => item.id)).toEqual([earlier.id, later.id, newest.id]);
   });
 
   test("restart preserves exact read/header receipts and subscriptions for actual session, not lane name", () => {

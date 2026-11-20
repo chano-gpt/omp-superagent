@@ -25,7 +25,7 @@ async function confirmedOffline(): Promise<boolean> {
   finally { socket.destroy(); }
 }
 
-/** Called only by the Bun pipe owner, after profile bootstrap. Never spawns or upgrades the daemon. */
+/** Authoritative SDK inventory in the Host helper, after profile bootstrap. Never spawns or upgrades the daemon. */
 export async function listServiceUnits(projectDir?: string, key?: string): Promise<ServiceUnit[]> {
   let units: UnitSnapshot[];
   const deadline = performance.now() + 2_000;

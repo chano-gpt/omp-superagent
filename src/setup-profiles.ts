@@ -3,7 +3,7 @@ import { REST, Routes, type RESTOptions } from "discord.js";
 import { Api, InputFile } from "grammy";
 import type { Config } from "./config";
 import { validateCredential } from "./credentials";
-import { withTelegramSignal } from "./telegram";
+import { withTelegramSignal } from "./telegram-signal";
 
 const avatar = new URL("../assets/superagent-avatar.jpg", import.meta.url);
 

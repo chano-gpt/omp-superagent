@@ -8,6 +8,45 @@ When redistributing dependencies, preserve their LICENSE/NOTICE files and those
 of their transitive dependencies. This document also identifies conceptual
 references separately from copied or adapted material.
 
+## Native Host owner and Gateway
+
+The npm package contains `omp-host-owner` and `omp-gateway` for macOS and Linux
+(x64 and arm64). It does not include or build OMP. Each binary has a matching
+`host-owner/bin/notices/<platform>-<arch>/` or
+`gateway/bin/notices/<platform>-<arch>/` directory. `Cargo-LICENSES.txt` and
+`Cargo-SOURCES.txt` index the locked target's Cargo dependencies, their declared
+licenses and their versioned sources. `crates/` preserves the upstream license
+and notice files, including bundled native sources' notices.
+`rust/COPYRIGHT-library.html` and `rust/licenses/` preserve the Rust standard
+library, runtime and bundled musl notices. Preserve the matching notice directory
+when redistributing a binary.
+
+The Gateway's graph is pinned by `gateway/Cargo.lock`. In particular:
+
+- The Linux Gateway statically links the SQLite amalgamation from
+  [`libsqlite3-sys` 0.35.0](https://docs.rs/crate/libsqlite3-sys/0.35.0/source/sqlite3/sqlite3.c).
+  SQLite is [public domain](https://sqlite.org/copyright.html), and Linux notices
+  include the dedication from the actual amalgamation used. The macOS Gateway
+  links Apple's `/usr/lib/libsqlite3.dylib` and does not redistribute the
+  amalgamation. The Rust bindings and `rusqlite` 0.37.0 retain their MIT licenses
+  on both platforms.
+- HTTP uses `reqwest` 0.12.28 with rustls, not OpenSSL. WebSockets use
+  `tokio-tungstenite` 0.28.0 with rustls and `webpki-roots`. The locked TLS
+  graph's notices include rustls, webpki, the Mozilla-root data and ring's
+  BoringSSL and other bundled code notices.
+- Native Discord voice uses [`opus2` 0.4.0](https://docs.rs/crate/opus2/0.4.0)
+  (MIT or Apache-2.0). [`libopus_sys` 0.3.3](https://docs.rs/crate/libopus_sys/0.3.3/source/)
+  builds its bundled Xiph.Org Opus codec statically. Redistribution must also
+  preserve its separate `opus/COPYING` and corresponding notices.
+- DAVE uses [`davey` 0.2.0](https://docs.rs/crate/davey/0.2.0), whose
+  [upstream MIT license](https://github.com/Snazzah/davey/blob/72d1c6d081f4993d618806990f1d3a1f6f53ed67/LICENSE)
+  is credited to `Copyright (c) 2025-present Snazzah`. Where published crate
+  archives omit workspace notices, release staging carries the texts from
+  the crates' recorded Git revisions (davey, OpenMLS, libcrux and hax) or the
+  [MPL-2.0 text](https://www.mozilla.org/MPL/2.0/) declared by hpke-rs.
+  For the MPL-2.0-covered hpke-rs components, obtain the corresponding source at
+  the locked crates.io archive URLs in `Cargo-SOURCES.txt`.
+
 ## Artwork adapted from oh-my-pi
 
 - Source: [README hero](https://github.com/can1357/oh-my-pi/blob/c308970263ae13744ea15ab67302e3dac840e266/assets/hero.png)
@@ -56,11 +95,12 @@ SOFTWARE.
 
 ## Discord transport
 
-- The optional voice link uses [`@discordjs/voice` 0.19.2](https://www.npmjs.com/package/@discordjs/voice/v/0.19.2)
+- The previous Bun voice link, retained as a test oracle, uses [`@discordjs/voice` 0.19.2](https://www.npmjs.com/package/@discordjs/voice/v/0.19.2)
   (Apache-2.0), its locked DAVE implementation [`@snazzah/davey` 0.1.12](https://github.com/Snazzah/davey),
   [`opusscript` 0.0.8](https://github.com/abalabahaha/opusscript) (MIT bindings for libopus),
   and [`@noble/ciphers` 2.4.0](https://github.com/paulmillr/noble-ciphers) (MIT) for XChaCha20 transport encryption.
-  These packages are installed as dependencies, not vendored. Their licenses and included codec notices remain applicable.
+  These are development dependencies, not shipped native Gateway dependencies.
+  Their licenses and included codec notices remain applicable.
 - For subscription voice, we compared the independent billing/transport paths in
   [TheSmokeDev/hermes-talk `f19bc975`](https://github.com/TheSmokeDev/hermes-talk/blob/f19bc975d3f5ea1bfb533c42966cec2fca7f7678/talk_live_realtime.py)
   and the WebRTC media, server-side event handling and retention caveats in
@@ -69,16 +109,16 @@ SOFTWARE.
   credits `Copyright (c) 2026 SmokeDev`; the [codex-voice MIT notice](https://github.com/dmmeteo/codex-voice/blob/956d6b299f13b02a7ad036a619568e1740a2ee67/LICENSE-MIT)
   credits `Copyright (c) 2026 codex-asr contributors`. Both use the MIT permission notice reproduced above.
   Neither project grants a subscription entitlement. Discord routing, source-bound confirmation and HEAD delivery remain this project's responsibilities.
-- Gateway/REST and component support use the
-  [discord.js](https://github.com/discordjs/discord.js) dependency, not a copied
-  client. The declared range is `^14.25.1`; `bun.lock` records the resolved version.
+- The Bun Gateway oracle and the production one-shot setup path use
+  [discord.js](https://github.com/discordjs/discord.js), not a copied client.
+  The declared range is `^14.25.1`; `bun.lock` records the resolved version.
   The inspected installed version, `14.28.1`, is **Apache-2.0, not MIT**.
 - The full license is in `node_modules/discord.js/LICENSE` and the
   [versioned upstream LICENSE](https://github.com/discordjs/discord.js/blob/14.28.1/packages/discord.js/LICENSE).
   It includes `Copyright 2021 Noel Buechler` and `Copyright 2015 Amish Shah`.
   Distributions containing the package must include its Apache-2.0 license and
   applicable notices; the project MIT license does not replace these terms.
-- `src/discord.ts` independently implements behavior compared with
+- `test/oracles/bun-gateway/discord.ts` independently implements behavior compared with
   [ompbot `4d2eb28d0bf66644892dc0fc333580d0eb7e7780`](https://github.com/gimso2x/ompbot/tree/4d2eb28d0bf66644892dc0fc333580d0eb7e7780),
   `src/discord/{adapter,attachments,channel,transport}.ts`. That revision is MIT;
   those files were not copied.
@@ -196,7 +236,8 @@ was imported. This project continues to use stock OMP and native skill discovery
   source revision `055a5a440f04d0b9fd5fd75a6d14dac4c2b83553`.
   Installed metadata is in `node_modules/grammy/package.json`; dependency pins
   are in `bun.lock`.
-- `src/telegram.ts` and `src/setup-profiles.ts` use `Api` and `InputFile`, not a
+- The Bun Gateway oracle (`test/oracles/bun-gateway/telegram.ts`) and
+  `src/setup-profiles.ts` use `Api` and `InputFile`, not a
   copied Telegram bot or SUL implementation. Version `1.46.0`'s
   `Api.setMyProfilePhoto`, the [official method](https://core.telegram.org/bots/api#setmyprofilephoto),
   and [JPEG multipart contract](https://core.telegram.org/bots/api#inputprofilephotostatic)
@@ -242,9 +283,10 @@ SOFTWARE.
 | `@slack/web-api` | `8.3.0` | [`d8df118652c5749e56e00bb4f614b344993a24e4`](https://github.com/slackapi/node-slack-sdk/tree/d8df118652c5749e56e00bb4f614b344993a24e4) | MIT |
 | `@slack/socket-mode` | `3.2.0` | [`5e8d3f08c16144a2d700c38389bf94cbcc4d5f0f`](https://github.com/slackapi/node-slack-sdk/tree/5e8d3f08c16144a2d700c38389bf94cbcc4d5f0f) | MIT |
 
-- `src/slack.ts` uses the official `WebClient` and `SocketModeClient`.
-  Transport, routing, and approval coordination are implemented by this
-  repository's adapter, not copied from another Slack bot or SUL-covered bot.
+- The Bun Gateway oracle (`test/oracles/bun-gateway/slack.ts`) uses the
+  official `WebClient` and `SocketModeClient`. Only `WebClient`, for one-shot
+  setup, remains a production Node Slack SDK dependency. Transport, routing and
+  approval coordination were not copied from another Slack bot or SUL-covered bot.
 - Documentation: [Web API SDK](https://docs.slack.dev/tools/node-slack-sdk/web-api/),
   [Socket Mode SDK](https://docs.slack.dev/tools/node-slack-sdk/socket-mode/),
   [Socket Mode setup](https://docs.slack.dev/apis/events-api/using-socket-mode),
@@ -367,9 +409,14 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   or `hasPendingAsyncWork()` on older CLIs that still use it for RPC. Separate
   owned-resource checks remain intact.
   The upstream copyright and MIT terms below apply to this adapted projection.
-- The published SDK and the source artwork identified above retain the following
-  MIT notice, also present in the installed package's `LICENSE` and the
-  [upstream LICENSE](https://github.com/can1357/oh-my-pi/blob/3e8cff3b7ce19a805c11a26a6dd1703066435851/LICENSE):
+- `host-owner/src/wire.rs` adapts the wire limits and v1 shrink pass
+  thresholds and elision markers from stock
+  [`rpc-frame.ts` in v19.0.0](https://github.com/can1357/oh-my-pi/blob/57771ae562b9345e0579bceb2d68d585e3e6927e/packages/coding-agent/src/modes/rpc/rpc-frame.ts)
+  for JSONL/v2 interoperability. The upstream MIT terms apply to those
+  adaptations, including in the compiled Host owner.
+- The adaptations, published SDK and source artwork identified above retain the
+  following MIT notice, also present in the installed package's `LICENSE` and the
+  [upstream LICENSE](https://github.com/can1357/oh-my-pi/blob/57771ae562b9345e0579bceb2d68d585e3e6927e/LICENSE):
 
 ```text
 MIT License

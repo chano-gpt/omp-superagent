@@ -186,7 +186,9 @@ omp-sa --help
 설정은 설치 디렉터리가 아닌 사용자 작업 디렉터리에
 `omp-sa setup --config ./config.local.json`으로 만든다. 설치만으로 봇을 활성화하지 않는다.
 
-소스 checkout이나 GitHub 소스 tarball은 저장소 루트에서 실행한다.
+배포용 npm 패키지는 플랫폼에 맞는 Gateway와 Host 중계기 실행 파일을 포함한다. 소스 checkout이나 GitHub 소스
+tarball에서는 stable Rust/Cargo, CMake와 C 컴파일러를 준비하고 저장소 루트에서 실행한다. Cargo는 각 `Cargo.lock`에
+맞춰 이 두 실행 파일을 빌드하며 OMP는 빌드하지 않는다. Rust 소스 수정 후에는 `bun run build:native`로 다시 준비한다.
 
 ```sh
 bun install --frozen-lockfile
@@ -325,7 +327,7 @@ interaction token은 저장하거나 헤드에 넘기지 않는다. Discord는 �
    chat에서도 헤드의 새 주제 인계 시 실제 topic을 우선 생성한다. 미지원 private chat은
    `/new`·`/main`의 논리 주제를 사용한다. 일반 그룹에 가짜 forum/thread ID를 만들거나
    topic 모드를 임의로 활성화하지 않는다.
-5. 시작 시 grammY `getMe`로 봇을 확인하고 `getWebhookInfo`를 확인한 뒤 `getUpdates` long polling을
+5. 시작 시 Telegram Bot API `getMe`로 봇을 확인하고 `getWebhookInfo`를 확인한 뒤 `getUpdates` long polling을
    사용한다. public endpoint는 필요 없다. **기존 webhook이 있으면 시작을 거부하며 자동 삭제하지
    않는다.** 기존 webhook/polling 소비자와 함께 실행하지 말고 운영자가 명시적으로 전환한다.
    인증 완료만으로 polling을 시작하지 않으며 runtime의 시작 시 승인 조정이 완료된 뒤 수신을
@@ -336,8 +338,8 @@ read -r -s TELEGRAM_BOT_TOKEN
 export TELEGRAM_BOT_TOKEN
 ```
 
-[Bot API](https://core.telegram.org/bots/api#getupdates)·[grammY API](https://grammy.dev/guide/api)를
-사용한다. 업데이트는 Gateway가 원본 이벤트를 durable admission한 뒤 다음 offset을 저장하며,
+[Telegram Bot API](https://core.telegram.org/bots/api#getupdates)를 사용한다.
+업데이트는 Gateway가 원본 이벤트를 durable admission한 뒤 다음 offset을 저장하며,
 그 offset을 사용한 다음 polling에서 Telegram 측 확인이 진행된다. Bot API에는 대화 history나
 임의 `getMessage` 조회가 없다. 복구는 저장한 offset과 Telegram의 **최대 24시간 업데이트 보존**에
 한정되고, 임의의 과거 대화·기한이 지난 업데이트·옛 메시지 수정/삭제를 복원할 수 없다.
@@ -670,7 +672,8 @@ bun --no-env-file src/cli.ts doctor --config config.local.json
 bun --no-env-file src/cli.ts status --config config.local.json
 ```
 
-`doctor`는 설정과 설치 OMP의 버전·필요 CLI 기능을 확인한다. `platforms`에 설정된 플랫폼,
+`doctor`는 설정, 설치 OMP의 버전·필요 CLI 기능과 Host 중계기의 실행 권한을 확인한다.
+`hostOwnerExecutable`에 이 패키지에서 사용할 중계기 경로, `platforms`에 설정된 플랫폼,
 `credentials`에 환경변수 이름별 **존재 여부 boolean**, `messengersActivated: false`를 출력한다.
 토큰 값이나 과거 Discord 전용 `discordTokenPresent`/`discordActivated` 필드를 출력하지 않는다.
 봇 로그인·모델 인증·실제 작업 성공을 검증하지 않는다.

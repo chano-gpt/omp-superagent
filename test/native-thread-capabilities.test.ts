@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { ChannelFlagsBitField, ChannelType, PermissionFlagsBits, PermissionsBitField, type Client, type MessageCreateOptions, type ThreadEditOptions } from "discord.js";
 import type { WebClientOptions } from "@slack/web-api";
-import { DiscordMessenger } from "../src/discord.ts";
-import { SlackMessenger, type SlackMessengerOptions } from "../src/slack.ts";
-import { TelegramMessenger } from "../src/telegram.ts";
+import { DiscordMessenger } from "./oracles/bun-gateway/discord.ts";
+import { SlackMessenger, type SlackMessengerOptions } from "./oracles/bun-gateway/slack.ts";
+import { TelegramMessenger } from "./oracles/bun-gateway/telegram.ts";
 import { DeliveryError } from "../src/delivery.ts";
 import type { Route } from "../src/contracts.ts";
 

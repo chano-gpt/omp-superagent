@@ -206,6 +206,7 @@ describe("native lane reporting", () => {
     f.completed("changed", "bash", false, { exitCode: 1 });
     f.call("pending");
     f.call("failed");
+    f.completed("failed");
     f.completed("failed", "bash", true);
     f.completed("orphan");
     f.call("wrong-name");
@@ -227,6 +228,23 @@ describe("native lane reporting", () => {
     f.session.resetLeaf();
     expect(f.session.getEntries().length).toBeGreaterThan(0);
     await expect(f.execute(input("success"))).rejects.toThrow("completed successful native tool call");
+  });
+
+  test("a tool wait keeps evidence order and duplicates while using the first call and latest result", async () => {
+    const f = await fixture();
+    f.call("repeated", "bash");
+    f.completed("repeated", "bash", true);
+    f.call("repeated", "read");
+    f.completed("repeated", "bash", false, { exitCode: 1 });
+    f.call("other", "read");
+    f.completed("other", "read");
+    f.call("pending");
+    const waiting = { kind: "tool", id: "pending", target: "compiler" };
+    const output = await f.execute({ status: "waiting", summary: "Waiting for a second compile", waiting,
+      evidence: ["other", "repeated", "other"].map(toolCallId => ({ kind: "tool", toolCallId })) });
+    expect(parseLaneReportResult(output)?.report).toMatchObject({ waiting, evidence: [
+      { kind: "tool", ref: "other" }, { kind: "tool", ref: "repeated" }, { kind: "tool", ref: "other" },
+    ] });
   });
 
   test("report and board results cannot manufacture tool evidence", async () => {

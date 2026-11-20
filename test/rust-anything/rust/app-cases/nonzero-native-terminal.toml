@@ -1,0 +1,5 @@
+bin.name = "owner-fixture"
+args = ["child-nonzero"]
+status.code = 1
+fs.sandbox = true
+stderr = ""

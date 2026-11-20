@@ -7,14 +7,15 @@ import * as path from "node:path";
 import { parseSessionEntries, type FileEntry } from "@oh-my-pi/pi-coding-agent";
 import { type Config, hostPaths, privateDirectory } from "../../src/config";
 import type { Approval, Inbound, Lane, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../../src/contracts";
-import { startGateway, gatewayPaths, type GatewayService, type GatewayStatus } from "../../src/gateway";
+import { gatewayPaths } from "../../src/gateway-protocol";
+import type { GatewayStatus } from "../../src/gateway-wire";
+import { startGateway, type GatewayService } from "../oracles/bun-gateway/gateway";
 import { HostConnection } from "../../src/host";
 import { nativeDisabledProviders } from "./native-extension";
 import { runNativeUlwProof } from "./native-ulw-proof";
 import { runNativeRecoveryProof } from "./native-recovery-proof";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 import { nativeTestCommand } from "./native-command";
-import { prepareHostFixture } from "./host-fixture-processes";
 
 type Handlers = Parameters<Messenger["start"]>[0];
 const interrupted = new AbortController();
@@ -138,7 +139,6 @@ const agent = path.join(root, "agent");
 const headCwd = path.join(root, "head");
 const laneCwd = path.join(root, "topic");
 for (const directory of [agent, headCwd, laneCwd]) privateDirectory(directory);
-for (const cwd of [headCwd, laneCwd]) await prepareHostFixture(cwd);
 const model = "gateway-native/local";
 const settings = {
   disabledProviders: nativeDisabledProviders, modelRoles: { default: model, judge: model },

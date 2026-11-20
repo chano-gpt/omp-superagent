@@ -9,17 +9,17 @@ import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-l
 import { main } from "../src/cli";
 import { hostPaths, type Config } from "../src/config";
 import type { GatewayRestartRecord, GatewayRestartRequest, Inbound } from "../src/contracts";
-import { launchGateway } from "../src/gateway";
+import { launchGateway } from "./oracles/bun-gateway/gateway";
 import { gatewayPaths } from "../src/gateway-protocol";
-import { processAlive, restartConfigHash, runGatewayRestart, type RestartPlan } from "../src/gateway-restart";
-import { GatewayStore } from "../src/gateway-store";
+import { processAlive, restartConfigHash, runGatewayRestart, type RestartPlan } from "./oracles/bun-gateway/gateway-restart";
+import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
 import type { ManagedUlwStatus } from "../src/managed-ulw";
 import { Store } from "../src/store";
 import {
   cleanups, configFixture, detachedFixture, fixture, LIFECYCLE_PHASE_MS, metadata,
   route, RPC_MS, STARTUP_MS, token, until, waitStatus, withFixtureToken,
 } from "./fixtures/gateway-lifecycle";
-import { waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
+import { assertResidentFixtureOwner, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 
 const RESTART_SHUTDOWN_MS = 2 * LIFECYCLE_PHASE_MS + RPC_MS; // runner preparation, shutdown RPC, then owner exit
 
@@ -86,6 +86,7 @@ test("a busy owned HEAD refuses shutdown, and explicit stop cancels an accepted 
   const owned = metadata<RestartPlan["head"]>(f.root, "gateway:head");
   if (!owned) throw new Error("Gateway did not save the launched Host identity");
   expect(owned).toMatchObject(head);
+  await assertResidentFixtureOwner(f.root, { nativePid: pid, ownerPid: owned.ownerPid });
   expect(f.service.status().head.initialization).toMatchObject({ sessionId: head.sessionId, state: "complete" });
 
   await writeFile(join(f.root, "busy"), "busy");
@@ -228,7 +229,7 @@ test("restart execution distinguishes spawn failure, native refusal and ambiguou
   const liveRunners = new Set<ChildProcess>();
   const f = await fixture({ launchRestartRunner(path, requestId, fd) {
     if (spawnFails || closing) return spawn("/nonexistent/omp-superagent-restart-runner", [], { stdio: "ignore" });
-    const runner = spawn(process.execPath, ["--no-env-file", fileURLToPath(new URL("../src/gateway-restart.ts", import.meta.url)),
+    const runner = spawn(process.execPath, ["--no-env-file", fileURLToPath(new URL("./oracles/bun-gateway/gateway-restart.ts", import.meta.url)),
       "--config", path, "--state-dir", dirname(path), "--request", requestId], { cwd: dirname(path), stdio: ["ignore", fd, fd] });
     liveRunners.add(runner);
     runner.once("exit", () => liveRunners.delete(runner));

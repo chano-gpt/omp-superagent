@@ -10,7 +10,7 @@ export const DISCORD_COMMANDS: readonly RESTPostAPIChatInputApplicationCommandsJ
   type: ApplicationCommandType.ChatInput, name: command.name, description: command.description,
   contexts: [InteractionContextType.Guild, InteractionContextType.BotDM],
   integration_types: [ApplicationIntegrationType.GuildInstall],
-  ...("text" in command ? { options: [{ type: ApplicationCommandOptionType.String, name: "text", description: command.text, required: false }] } : {}),
+  ...(command.text !== undefined ? { options: [{ type: ApplicationCommandOptionType.String, name: "text", description: command.text, required: false }] } : {}),
 }));
 
 /** Reject stale registrations/options instead of silently executing a different command. */

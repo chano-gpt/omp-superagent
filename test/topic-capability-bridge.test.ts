@@ -6,9 +6,10 @@ import type { Approval, Attachment, Inbound, Messenger, OutputRecord, Route, Thr
 import { DeliveryError } from "../src/delivery";
 import { createGatewayMessenger } from "../src/gateway-client";
 import { gatewayCall, gatewayPaths } from "../src/gateway-protocol";
-import { GatewayServer, type GatewayStatus } from "../src/gateway-server";
-import { GatewayStore } from "../src/gateway-store";
-import { MessengerHub } from "../src/messengers";
+import { GatewayServer } from "./oracles/bun-gateway/gateway-server";
+import type { GatewayStatus } from "../src/gateway-wire";
+import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
+import { MessengerHub } from "./oracles/bun-gateway/messengers";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });

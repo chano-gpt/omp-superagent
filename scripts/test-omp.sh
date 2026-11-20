@@ -12,6 +12,15 @@ if [[ ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Expected an exact OMP release tag; got '$tag'." >&2
   exit 2
 fi
+# Install dependencies and build both Superagent executables before the test CLI exists.
+bun install --frozen-lockfile
+platform=$(bun --no-env-file -p '`${process.platform}-${process.arch}`')
+for binary in "host-owner/bin/omp-host-owner-$platform" "gateway/bin/omp-gateway-$platform"; do
+  if [[ ! -x $binary ]]; then
+    echo "Source installation did not create an executable $binary." >&2
+    exit 1
+  fi
+done
 asset=$(bun --no-env-file -p '`omp-${process.platform}-${process.arch}`')
 directory=$(mktemp -d "${TMPDIR:-/tmp}/omp-sa-test-cli.XXXXXXXX")
 trap 'rm -rf -- "$directory"' EXIT
@@ -31,6 +40,4 @@ if [[ $actual != "omp/${tag#v}" ]]; then
   echo "OMP release $tag reported '$actual'; refusing to test a different version." >&2
   exit 1
 fi
-# Installing the package must not depend on the CLI under test.
-bun install --frozen-lockfile
 PATH="$directory:$PATH" bun run test:ci

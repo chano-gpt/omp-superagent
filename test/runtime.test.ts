@@ -12,8 +12,8 @@ import type { HostOptions } from "../src/host";
 import { DeliveryError } from "../src/delivery";
 import { createGatewayMessenger, type GatewayHeadMessenger } from "../src/gateway-client";
 import { gatewayPaths } from "../src/gateway-protocol";
-import { GatewayServer } from "../src/gateway-server";
-import { GatewayStore } from "../src/gateway-store";
+import { GatewayServer } from "./oracles/bun-gateway/gateway-server";
+import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
 import { compareMessageIds } from "../src/message-order";
 import { readOmpUsage } from "../src/omp-usage";
 import { Superagent, type RuntimeAdapters, type RuntimeHost, type RuntimeState } from "../src/runtime";
@@ -1613,6 +1613,29 @@ describe("original-message processing reactions", () => {
 });
 
 describe("thread kickoff before execution", () => {
+  test("a persisted kickoff fence added during HEAD journal read holds native submission", async () => {
+    const { runtime, main, store } = fixture();
+    await runtime.start();
+    const reading = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    main.beforeEntries = async () => {
+      main.beforeEntries = undefined;
+      reading.resolve();
+      await release.promise;
+    };
+    const original = message("kickoff-during-head-journal");
+    await runtime.receive(original);
+    const draining = runtime.kick();
+    await reading.promise;
+    try {
+      // This durable write precedes the outbox receipt, including on restart.
+      store.setMeta(`kickoff-output:${original.id}`, `${original.id}:kickoff`);
+    } finally { release.resolve(); }
+    await draining;
+    expect(main.prompts).toEqual([]);
+    expect(store.input(original.id)?.state).toBe("pending");
+  });
+
   test("kickoff queued during an existing output drain is actually delivered before admission returns", async () => {
     const { runtime, messenger, store, directory } = fixture();
     await runtime.start();
@@ -2470,6 +2493,26 @@ describe("controlled Gateway AND HEAD restart", () => {
     expect(instance.messenger.sent[0]!.text).toContain("initialized and ready");
     expect(instance.store.input(input.id)).toMatchObject({ interactionId: input.interactionId, messageId: null, state: "done", route: input.route });
     expect(instance.requests).toEqual([]);
+    expect(instance.main.prompts).toEqual([]);
+  });
+
+  test.each([
+    [true, true, "off"], [undefined, false, "off"], [false, undefined, "off"], [false, true, "off"],
+    [false, false, "high"],
+  ] as const)("restart holds an absent effort when reasoning changes from %s to %s or effort becomes %s", async (before, after, effort) => {
+    const instance = restartFixture();
+    const { input, restart } = savedRestart(instance);
+    const checkpoint = { ...restart, checkpoint: { goalActive: false, residents: [],
+      model: { ...executionModel, reasoning: before } } };
+    instance.store.setMeta(`head:restart:${input.id}`, JSON.stringify(checkpoint));
+    instance.store.setMeta("head:restart-fence", JSON.stringify(checkpoint));
+    const resumed = { ...executionModel, reasoning: after };
+    instance.main.state.model = resumed;
+    instance.main.state.thinkingLevel = effort;
+    await instance.runtime.start();
+    await instance.runtime.kick();
+    expect(JSON.parse(instance.store.getMeta("head:restart-fence")!).state).toBe("failed");
+    expect(instance.store.output(`${input.id}:restart-result`)?.text).toContain("differs from its checkpoint");
     expect(instance.main.prompts).toEqual([]);
   });
 

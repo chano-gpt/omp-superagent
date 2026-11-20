@@ -4,7 +4,7 @@ import type { Config } from "./config";
 import type { Approval, Attachment, DiscordContext, DiscordPurposeNote, DiscordPurposeRequest, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Route, ThreadInfo, ThreadUpdate } from "./contracts";
 import { DeliveryError } from "./delivery";
 import { gatewayCall, gatewayPaths, gatewayRequest, MAX_GATEWAY_ATTACHMENT, MAX_GATEWAY_FRAME, readGatewayJson, type GatewayResult } from "./gateway-protocol";
-import type { GatewayReceipt, QueuedEvent } from "./gateway-store";
+import type { GatewayReceipt, QueuedEvent } from "./gateway-wire";
 
 export interface GatewayHeadMessenger extends Messenger {
   assertRoute(route: Route): Promise<void>;

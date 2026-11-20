@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
 import { hostPaths, type Config } from "../../src/config";
 import type { Inbound, Messenger, OutputRecord, Route } from "../../src/contracts";
-import type { GatewayService } from "../../src/gateway";
+import type { GatewayService } from "../oracles/bun-gateway/gateway";
 import { HostConnection } from "../../src/host";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 

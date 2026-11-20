@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, requireMessengerCredentials } from "../../src/config";
 import { loadCredentials } from "../../src/credentials";
 import type { Inbound, Messenger } from "../../src/contracts";
-import { runGatewayRestart } from "../../src/gateway-restart";
+import { runGatewayRestart } from "../oracles/bun-gateway/gateway-restart";
 
 const arg = (name: string) => { const at = process.argv.indexOf(name); return at < 0 ? undefined : process.argv[at + 1]; };
 const config = await loadConfig(arg("--config")!);
@@ -16,7 +16,7 @@ if (existsSync(cleanup)) throw new Error("Fixture has already been stopped");
 loadCredentials(config);
 requireMessengerCredentials(config);
 // Keep the same credential-before-native-import boundary as the supported CLI loader.
-const { launchGateway, startGateway } = await import("../../src/gateway");
+const { launchGateway, startGateway } = await import("../oracles/bun-gateway/gateway");
 const self = fileURLToPath(import.meta.url);
 if (arg("--runner")) {
   await runGatewayRestart(config.path, arg("--runner")!, {

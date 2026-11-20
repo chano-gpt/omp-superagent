@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import type { WebClientOptions } from "@slack/web-api";
-import { SlackMessenger, type SlackMessengerOptions } from "../src/slack.ts";
+import { SlackMessenger, type SlackMessengerOptions } from "./oracles/bun-gateway/slack.ts";
 import { DeliveryError } from "../src/delivery.ts";
 import type { Approval, DialogResponse, Inbound, Messenger, OutputRecord, Route } from "../src/contracts.ts";
 import { MESSENGER_COMMANDS } from "../src/messenger-commands.ts";
@@ -404,6 +404,34 @@ describe("Slack authenticated intake and durable ACK", () => {
 });
 
 describe("Slack side effects, exact history, and threads", () => {
+  test("overlapping sends share only the same physical route's pending authorization", async () => {
+    const { messenger, http } = await fixture();
+    const gate = Promise.withResolvers<void>();
+    http.behavior.set("conversations.info", async ({ channel }) => {
+      await gate.promise;
+      return { channel: http.channels.get(channel) };
+    });
+    const thread = "1000.000001";
+    const send = (text: string, target = route) => messenger.send({ ...output(text, target), id: text });
+    try {
+      const pending = [send("first"), send("second"), send("thread", { ...route, threadId: thread })];
+      gate.resolve();
+      const receipts = await Promise.all(pending);
+      expect(new Set(receipts).size).toBe(3);
+      expect(http.remote.get(`${route.channelId}:${receipts[2]}`)?.thread_ts).toBe(thread);
+      expect(http.calls.filter(call => call.method === "conversations.info")).toHaveLength(2);
+
+      http.behavior.set("conversations.info", () => ({ ok: false, error: "not_in_channel" }));
+      await expect(send("revoked")).rejects.toMatchObject({ certainty: "rejected" });
+      expect(http.remote.size).toBe(3);
+
+      http.behavior.delete("conversations.info");
+      const restored = await send("restored");
+      expect(http.remote.get(`${route.channelId}:${restored}`)?.text).toBe("restored");
+      expect(http.calls.filter(call => call.method === "conversations.info")).toHaveLength(4);
+    } finally { await messenger.stop(); }
+  });
+
   test("short text is untrusted plain text without mentions, parsing, or unfurls", async () => {
     const f = await fixture();
     const text = "<!everyone> <@UOTHER> <https://evil.invalid|link> & :here:";

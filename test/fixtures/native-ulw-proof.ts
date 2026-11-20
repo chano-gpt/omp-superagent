@@ -6,7 +6,7 @@ import { parseSessionEntries, type FileEntry } from "@oh-my-pi/pi-coding-agent";
 import { hostPaths, type Config } from "../../src/config";
 import type { Inbound, InputRecord, Lane, Messenger, OutputRecord, Route } from "../../src/contracts";
 import { HostConnection } from "../../src/host";
-import type { GatewayService } from "../../src/gateway";
+import type { GatewayService } from "../oracles/bun-gateway/gateway";
 import { waitForFixtureProcessExit } from "./host-fixture-processes";
 import { nativeRequestEnvelope } from "./native-request-envelope";
 

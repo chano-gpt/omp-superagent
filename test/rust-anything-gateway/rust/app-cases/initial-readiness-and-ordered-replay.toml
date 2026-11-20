@@ -1,0 +1,5 @@
+bin.name = "gateway-fixture"
+args = ["admission"]
+status.code = 0
+fs.sandbox = true
+stderr = ""

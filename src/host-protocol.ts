@@ -26,31 +26,72 @@ export type Response = Frame & { success: boolean; data?: unknown; error?: strin
 export type HostResponse = RpcResponse | {
   type: "response"; id?: string; command: "shutdown_host" | "set_model_preset" | "get_host_admission"; success: true; data: Frame;
 } | {
+  type: "response"; id?: string; command: "set_host_message_updates"; success: true;
+  data: { readonly messageUpdates: "full" | "activity-v1" };
+} | {
   type: "response"; id?: string; command: string; success: false; error: string; code?: string;
 };
 export class HostRequestTimeout extends Error {
   constructor() { super("Host request timed out; its outcome may be unknown"); }
 }
 
+export const serviceGenerationKey = (value: Frame | ServiceUnit) =>
+  JSON.stringify([value.owner, value.id, value.generation, value.startedAt, value.restartCount]);
+
+const hasValidGeneration = (daemon: Frame | ServiceUnit) =>
+  !("generation" in daemon) || typeof daemon.generation === "string" && daemon.generation.length > 0;
+const isFrame = (value: unknown): value is Frame => value !== null && typeof value === "object";
+const isTerminal = (state: unknown): state is "exited" | "failed" => state === "exited" || state === "failed";
+
+function launchCompletions(value: unknown): readonly unknown[] | undefined {
+  if (!isFrame(value) || value.type !== "custom_message" || value.customType !== "launch-completion") return;
+  return isFrame(value.details) && Array.isArray(value.details.daemons) ? value.details.daemons : undefined;
+}
+
+function serviceExitKey({ owner, id, generation, startedAt, restartCount, exitedAt }: Frame | ServiceUnit): string | undefined {
+  if (typeof owner !== "string" || typeof id !== "string"
+    || generation !== undefined && (typeof generation !== "string" || !generation)
+    || typeof startedAt !== "number" || typeof restartCount !== "number" || typeof exitedAt !== "number"
+    || Number.isNaN(startedAt) || Number.isNaN(restartCount) || Number.isNaN(exitedAt)) return undefined;
+  // Keep numeric equality exact; JSON number encoding would collapse non-finite
+  // timestamps into null. A legacy completion has no generation string.
+  return JSON.stringify([owner, id, generation, String(startedAt), String(restartCount), String(exitedAt)]);
+}
+
 /** Positive native journal evidence for this exact terminal service generation. */
 export function serviceCompletionRecorded(daemon: Frame, entries: readonly unknown[]): boolean {
-  if (typeof daemon.owner !== "string" || typeof daemon.id !== "string" || typeof daemon.startedAt !== "number"
-    || typeof daemon.restartCount !== "number" || typeof daemon.exitedAt !== "number"
-    || ("generation" in daemon && (typeof daemon.generation !== "string" || !daemon.generation))
-    || !["exited", "failed"].includes(String(daemon.state))) return false;
-  return entries.some(value => {
-    if (!value || typeof value !== "object") return false;
-    const entry = value as Frame;
-    const details = entry.details as Frame | undefined;
-    return entry.type === "custom_message" && entry.customType === "launch-completion"
-      && Array.isArray(details?.daemons) && details.daemons.some(value => {
-        if (!value || typeof value !== "object") return false;
-        const observed = value as Frame;
-        // Legacy journal rows had no generation field; never match them to a new daemon generation.
-        return ["owner", "id", "generation", "startedAt", "restartCount", "state", "exitedAt"]
-          .every(field => daemon[field] === observed[field]);
-      });
-  });
+  const key = serviceExitKey(daemon);
+  if (key === undefined || !hasValidGeneration(daemon) || !isTerminal(String(daemon.state))) return false;
+  return entries.some(entry => launchCompletions(entry)?.some(observed => isFrame(observed)
+    && observed.state === daemon.state && serviceExitKey(observed) === key));
+}
+
+/** Builds proof for the current observation only, from one native transcript. */
+export function indexServiceCompletions(entries: readonly unknown[]) {
+  const byGeneration = new Set<string>();
+  const exact = { exited: new Set<string>(), failed: new Set<string>() };
+  let generationEvidenceBlocked = false;
+  for (const entry of entries) {
+    const daemons = launchCompletions(entry);
+    if (!daemons) continue;
+    for (const observed of daemons) {
+      // The historical generation lookup could not cross an unreadable row.
+      if (observed === null || observed === undefined) generationEvidenceBlocked = true;
+      if (!isFrame(observed) || !isTerminal(observed.state)) continue;
+      const key = serviceExitKey(observed);
+      if (key === undefined) continue;
+      exact[observed.state].add(key);
+      if (!generationEvidenceBlocked && hasValidGeneration(observed)) byGeneration.add(serviceGenerationKey(observed));
+    }
+  }
+  return {
+    hasGeneration: (key: string) => byGeneration.has(key),
+    hasCompletion: (daemon: Frame | ServiceUnit) => {
+      if (!isTerminal(daemon.state) || !hasValidGeneration(daemon)) return false;
+      const key = serviceExitKey(daemon);
+      return key !== undefined && exact[daemon.state].has(key);
+    },
+  };
 }
 
 /** Public native JSONL/v2 framing, with correlation owned by this adapter. */

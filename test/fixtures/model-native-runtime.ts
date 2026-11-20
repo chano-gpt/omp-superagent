@@ -904,7 +904,7 @@ export async function nativeRuntime(modelSelection = false): Promise<void> {
       // model and effort remain independent and win over that role default.
       const restartOptions: HostOptions = { ...headOptions, model: undefined,
         modelSettings: confirmedHeadSettings, clearedModelRoles: confirmedClearedRoles };
-      const restartArgs = buildHostArgs(restartOptions);
+      const restartArgs = await buildHostArgs(restartOptions);
       expect(restartArgs).not.toContain("--model-preset");
       expect(restartArgs).not.toContain("--model");
       const restarted = await startHost(restartOptions);

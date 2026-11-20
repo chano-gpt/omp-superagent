@@ -93,7 +93,7 @@ async function readScope(runtimeDir: string, key?: string): Promise<ServiceUnit[
   } finally { socket.destroy(); }
 }
 
-/** Use the same profile as the ordinary pipe owner, without acquiring a broker lease. */
+/** Use the exact native Host profile, without acquiring a broker lease. */
 export function brokerServiceInventory(hostCwd: string) {
   const projects = dirname(getDaemonRuntimeDir(hostCwd));
   const globals = join(dirname(getDaemonDir()), "daemons", "global");

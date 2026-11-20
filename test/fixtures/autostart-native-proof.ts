@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { hostPaths, loadConfig } from "../../src/config";
 import type { Messenger } from "../../src/contracts";
 import { loadCredentials } from "../../src/credentials";
+import type { GatewayService } from "../oracles/bun-gateway/gateway";
 
 const root = (() => {
   const value = process.env.OMP_AUTOSTART_NATIVE_ROOT;
@@ -39,7 +40,7 @@ const evidence: Record<string, unknown> = {
 };
 let installedBytes: Buffer | undefined;
 let registrationOwned = false;
-let service: import("../../src/gateway").GatewayService | undefined;
+let service: GatewayService | undefined;
 let headPid: number | undefined;
 let messengerStopped = false;
 
@@ -198,7 +199,7 @@ try {
   // Preserve the CLI's credential-before-native-import boundary.
   const { writeStockHostExecutable } = await import("./stock-host");
   await writeStockHostExecutable(executable, `import ${JSON.stringify(hostFixture)};\n`);
-  const { startGateway } = await import("../../src/gateway");
+  const { startGateway } = await import("../oracles/bun-gateway/gateway");
   const { gatewayPaths, gatewayStatus } = await import("../../src/gateway-protocol");
   const absent = await cli("status");
   assert.equal(absent.gateway, null);

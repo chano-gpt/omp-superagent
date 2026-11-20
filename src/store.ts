@@ -25,7 +25,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   HEAD_MODEL_CONTROL, physicalRoute, physicalRouteKey, routeKey, type Approval, type Inbound, type InputRecord, type Lane, type LaneModel, type ModelPreset, type LanePresetSnapshot,
-  type OutputRecord, type Route, type StorePort, type WorkflowActivation,
+  type ActiveInputState, type KickoffHold, type OutputRecord, type Route, type StorePort, type WorkflowActivation,
   type HeadModelChange, type HeadRecoveryAttempt, type HeadRecoveryEffect,
 } from "./contracts.ts";
 import type { ApprovalResolution } from "./contracts";
@@ -35,6 +35,8 @@ import { readLaneRows, toLane } from "./lane-rows";
 import { workflowChoice } from "./workflow";
 import { laneWaitKey, type LaneReport } from "./lane-report";
 import type { CronUpdate } from "./cron-jobs";
+
+const ACTIVE_INPUTS = "state IN ('pending','submitted','uncertain')";
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS lanes (
@@ -49,6 +51,9 @@ const SCHEMA = `
     UNIQUE(target, generation, request_id)
   );
   CREATE INDEX IF NOT EXISTS inputs_queue ON inputs(target, state, sequence);
+  CREATE INDEX IF NOT EXISTS inputs_active_order ON inputs(sequence) WHERE ${ACTIVE_INPUTS};
+  CREATE INDEX IF NOT EXISTS inputs_target_active_order ON inputs(target, sequence) WHERE ${ACTIVE_INPUTS};
+  CREATE INDEX IF NOT EXISTS inputs_state_active_order ON inputs(state, sequence) WHERE ${ACTIVE_INPUTS};
   CREATE INDEX IF NOT EXISTS inputs_message_id ON inputs(json_extract(data, '$.messageId'))
     WHERE json_type(data, '$.messageId') = 'text';
   CREATE TABLE IF NOT EXISTS lane_sources (
@@ -258,11 +263,39 @@ export class Store implements StorePort {
     return source;
   }
 
-  inputs(target?: string): InputRecord[] {
-    const rows = this.db.query(`SELECT * FROM inputs
-      WHERE state IN ('pending','submitted','uncertain') AND (?1 IS NULL OR target = ?1)
-      ORDER BY sequence`).all(target ?? null) as InputRow[];
+  inputs(target?: string, state?: ActiveInputState): InputRecord[] {
+    const scope = [ACTIVE_INPUTS];
+    const bindings: string[] = [];
+    if (target !== undefined) { scope.push("target = ?"); bindings.push(target); }
+    if (state !== undefined) { scope.push("state = ?"); bindings.push(state); }
+    // Without statistics SQLite can prefer the state index, sorting a global
+    // queue or scanning the same state for unrelated targets. Each shape has
+    // an index ordered by sequence after its equality prefix.
+    const index = target === undefined
+      ? (state === undefined ? "inputs_active_order" : "inputs_state_active_order")
+      : (state === undefined ? "inputs_target_active_order" : "inputs_queue");
+    const rows = this.db.query<InputRow, string[]>(`SELECT * FROM inputs INDEXED BY ${index}
+      WHERE ${scope.join(" AND ")} ORDER BY sequence`).all(...bindings);
     return rows.map(toInput);
+  }
+
+  hasInput(target: string, state: ActiveInputState): boolean {
+    return this.db.query("SELECT 1 FROM inputs WHERE target = ? AND state = ? LIMIT 1").get(target, state) !== null;
+  }
+
+  hasHeadRecoveryInput(): boolean {
+    return this.db.query(`SELECT 1 FROM inputs
+      JOIN metadata ON metadata.key = 'head-native-owner:' || inputs.id AND metadata.value <> ''
+      WHERE inputs.target = 'main' AND inputs.state = 'uncertain' LIMIT 1`).get() !== null;
+  }
+
+  kickoffHold(target: string): KickoffHold | null {
+    return this.db.query<KickoffHold, [string]>(`SELECT metadata.value AS outputId, COALESCE(outputs.state, 'missing') AS state
+      FROM inputs JOIN metadata ON metadata.key = 'kickoff-output:' || inputs.id
+      LEFT JOIN outputs ON outputs.id = metadata.value
+      WHERE inputs.target = ? AND inputs.${ACTIVE_INPUTS}
+        AND outputs.state IS NOT 'sent'
+      ORDER BY inputs.sequence LIMIT 1`).get(target);
   }
 
   firstAdmittedMessage(route: Route, messageId: string): InputRecord | null {

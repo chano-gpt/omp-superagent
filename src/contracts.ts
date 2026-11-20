@@ -165,6 +165,7 @@ export interface Lane {
 }
 
 export type InputState = "pending" | "submitted" | "done" | "uncertain" | "cancelled";
+export type ActiveInputState = Extract<InputState, "pending" | "submitted" | "uncertain">;
 export const WORKFLOW_NAMES = ["ulw", "mass-ulw", "ulw-plan", "ulw-loop", "ulw-execute", "ulw-research", "jevify"] as const;
 export type WorkflowName = typeof WORKFLOW_NAMES[number];
 export interface WorkflowChoice {
@@ -185,6 +186,10 @@ export interface InputRecord extends Inbound {
 }
 
 export type OutputState = "pending" | "sending" | "sent" | "uncertain" | "failed";
+export interface KickoffHold {
+  readonly outputId: string;
+  readonly state: OutputState | "missing";
+}
 export interface OutputRecord {
   id: string;
   sourceId: string;
@@ -257,7 +262,11 @@ export interface StorePort {
   receive(input: Inbound, target: string | null, metadata?: Readonly<Record<string, string>>, workflow?: WorkflowActivation | null): boolean;
   input(id: string): InputRecord | null;
   ownerSource(id: string): InputRecord | null;
-  inputs(target?: string): InputRecord[];
+  inputs(target?: string, state?: ActiveInputState): InputRecord[];
+  hasInput(target: string, state: ActiveInputState): boolean;
+  /** An uncertain HEAD input with a nonempty original native-owner record. */
+  hasHeadRecoveryInput(): boolean;
+  kickoffHold(target: string): KickoffHold | null;
   /** The first authorized revision on the physical route, even after settlement. */
   firstAdmittedMessage(route: Route, messageId: string): InputRecord | null;
   /** Actual authorized message IDs in durable admission order; not invocation or edit IDs. */

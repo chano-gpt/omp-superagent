@@ -1,0 +1,195 @@
+use std::sync::Arc;
+
+use serde_json::{Map, Value, json};
+use tokio::sync::oneshot;
+
+use super::{
+    Hub,
+    protocol::{Fault, WireResult, effect_id, object, rejected},
+};
+use crate::store::{EffectStart, PHYSICAL_ROUTE_FIELDS, js_trim};
+
+impl Hub {
+    pub(super) async fn effect(self: &Arc<Self>, data: &Map<String, Value>) -> WireResult<Value> {
+        let (id, operation, args) = match (
+            data.get("id")
+                .and_then(Value::as_str)
+                .filter(|id| effect_id(id)),
+            data.get("operation").and_then(Value::as_str),
+            data.get("args").and_then(Value::as_array),
+        ) {
+            (Some(id), Some(operation), Some(args)) => (id, operation, args),
+            _ => return Err(rejected("Invalid Gateway effect")),
+        };
+        let allowed = match operation {
+            "send"
+            | "showApproval"
+            | "dismissApproval"
+            | "inspectThread"
+            | "inspectDiscordContext"
+            | "discordPurpose" => args.len() == 1,
+            "setActivity" | "updateThread" | "fetchAfter" => args.len() == 2,
+            "canCreateThread" => (1..=2).contains(&args.len()),
+            "createThread" => (2..=4).contains(&args.len()),
+            _ => false,
+        };
+        if !allowed {
+            return Err(rejected("Unknown Gateway effect"));
+        }
+        if let EffectStart::Previous(result) = self.store.begin_effect(id, operation, args)? {
+            return Ok(result);
+        }
+        let (send, result) = oneshot::channel();
+        let hub = Arc::clone(self);
+        let id = id.to_owned();
+        let operation = operation.to_owned();
+        let args = args.clone();
+        // An HTTP cancellation is not permission to cancel a remote mutation
+        // after its attempt has been journaled. Shutdown drains this task too.
+        drop(self.effects.spawn(async move {
+            let result = match hub.dispatch_effect(&operation, args).await {
+                Ok(value)
+                    if value.is_null()
+                        && matches!(operation.as_str(), "setActivity" | "dismissApproval") =>
+                {
+                    json!({"ok": true})
+                }
+                Ok(value) => json!({"ok": true, "value": value}),
+                Err(fault) => fault.into_json(),
+            };
+            let receipt = hub.store.finish_effect(&id, &result).map(|()| result);
+            drop(send.send(receipt));
+        }));
+        Ok(result.await.map_err(anyhow::Error::from)??)
+    }
+
+    async fn dispatch_effect(&self, operation: &str, mut args: Vec<Value>) -> WireResult<Value> {
+        match (operation, args.as_mut_slice()) {
+            ("send", [output]) => validate_reply(output)?,
+            ("setActivity", [message, state]) => {
+                if !matches!(state.as_str(), Some("received" | "thinking" | "idle")) {
+                    return Err(rejected("Invalid message activity"));
+                }
+                if !object(message)?
+                    .get("messageId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty())
+                {
+                    return Err(rejected("Message activity requires a real message ID"));
+                }
+            }
+            ("canCreateThread", [_, tags]) | ("createThread", [_, _, _, tags]) => {
+                thread_tags(tags)?
+            }
+            ("updateThread", [_, update]) => validate_thread_update(update)?,
+            ("discordPurpose", [request]) => {
+                validate_purpose(request)?;
+                self.store.validate_discord_purpose(request)?;
+            }
+            _ => {}
+        }
+        self.adapters
+            .effect(operation, &args)
+            .await
+            .map_err(Fault::from)
+    }
+}
+
+fn validate_reply(output: &Value) -> WireResult<()> {
+    let output = object(output)?;
+    if let Some(reply) = output.get("replyTo") {
+        let reply = object(reply)?;
+        let source = object(reply.get("route").unwrap_or(&Value::Null))?;
+        let destination = object(output.get("route").unwrap_or(&Value::Null))?;
+        if destination.get("platform").and_then(Value::as_str) != Some("discord")
+            || !reply
+                .get("messageId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    (1..=20).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            || PHYSICAL_ROUTE_FIELDS
+                .iter()
+                .any(|field| source.get(*field) != destination.get(*field))
+        {
+            return Err(rejected(
+                "Discord reply requires a real message in the exact destination conversation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn thread_tags(value: &Value) -> WireResult<()> {
+    if !value
+        .as_array()
+        .is_some_and(|tags| tags.iter().all(Value::is_string))
+    {
+        return Err(rejected("Invalid thread tags"));
+    }
+    Ok(())
+}
+
+fn validate_thread_update(value: &Value) -> WireResult<()> {
+    let update = object(value)?;
+    if update.is_empty()
+        || update
+            .keys()
+            .any(|key| !matches!(key.as_str(), "title" | "appliedTags" | "archived"))
+        || update.get("title").is_some_and(|title| !title.is_string())
+        || update
+            .get("archived")
+            .is_some_and(|archived| !archived.is_boolean())
+    {
+        return Err(rejected("Invalid thread update"));
+    }
+    if let Some(tags) = update.get("appliedTags") {
+        thread_tags(tags)?;
+    }
+    Ok(())
+}
+
+fn validate_purpose(value: &Value) -> WireResult<()> {
+    let reject = || rejected("Invalid Discord purpose request");
+    let data = value.as_object().ok_or_else(reject)?;
+    let route = data
+        .get("route")
+        .and_then(Value::as_object)
+        .ok_or_else(reject)?;
+    let bounded = |value: Option<&Value>, max| {
+        value
+            .and_then(Value::as_str)
+            .is_some_and(|text| !js_trim(text).is_empty() && text.encode_utf16().count() <= max)
+    };
+    if !bounded(data.get("sourceId"), 1000)
+        || data
+            .keys()
+            .any(|key| !matches!(key.as_str(), "sourceId" | "route" | "action" | "purpose"))
+        || route.get("platform").and_then(Value::as_str) != Some("discord")
+        || ["accountId", "authorityId", "channelId"]
+            .iter()
+            .any(|field| {
+                route
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            })
+        || ["guildId", "threadId"].iter().any(|field| {
+            !route.get(*field).is_some_and(|value| {
+                value.is_null() || value.as_str().is_some_and(|id| !id.is_empty())
+            })
+        })
+        || route.get("guildId").is_some_and(Value::is_null)
+            && !route.get("threadId").is_some_and(Value::is_null)
+        || route
+            .keys()
+            .any(|key| !PHYSICAL_ROUTE_FIELDS.contains(&key.as_str()))
+    {
+        return Err(reject());
+    }
+    match data.get("action").and_then(Value::as_str) {
+        Some("list" | "clear") if !data.contains_key("purpose") => Ok(()),
+        Some("set") if bounded(data.get("purpose"), 4000) => Ok(()),
+        _ => Err(reject()),
+    }
+}

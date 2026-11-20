@@ -4,7 +4,7 @@ import { lstat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Config } from "./config";
 import { DeliveryError } from "./delivery";
-import type { GatewayStatus } from "./gateway-server";
+import type { GatewayStatus } from "./gateway-wire";
 
 export const MAX_GATEWAY_FRAME = 16 * 1024 * 1024;
 export const MAX_GATEWAY_ATTACHMENT = 20 * 1024 * 1024;

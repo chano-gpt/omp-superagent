@@ -1,0 +1,85 @@
+{
+  "afterRestart": {
+    "certainty": "uncertain",
+    "error": "Gateway effect outcome uncertain",
+    "http": 200,
+    "ok": false
+  },
+  "cached": {
+    "http": 200,
+    "ok": true,
+    "value": "remote:first"
+  },
+  "cachedAfterRestart": {
+    "http": 200,
+    "ok": true,
+    "value": "remote:first"
+  },
+  "complete": {
+    "http": 200,
+    "ok": true,
+    "value": "remote:first"
+  },
+  "concurrent": {
+    "certainty": "uncertain",
+    "error": "Gateway effect outcome uncertain",
+    "http": 200,
+    "ok": false
+  },
+  "conflict": {
+    "certainty": "uncertain",
+    "error": "Gateway operation failed",
+    "http": 400,
+    "ok": false
+  },
+  "remote": [
+    {
+      "remoteId": "remote:first",
+      "route": {
+        "accountId": "B1",
+        "authorityId": "T1",
+        "channelId": "D1",
+        "guildId": null,
+        "platform": "slack",
+        "threadId": null,
+        "topicId": "original"
+      },
+      "sourceId": "original-source",
+      "text": "completed before shutdown"
+    },
+    {
+      "remoteId": "remote:lost",
+      "route": {
+        "accountId": "B1",
+        "authorityId": "T1",
+        "channelId": "D1",
+        "guildId": null,
+        "platform": "slack",
+        "threadId": null,
+        "topicId": "original"
+      },
+      "sourceId": "original-source",
+      "text": "remote mutation with no receipt"
+    },
+    {
+      "remoteId": "remote:third",
+      "route": {
+        "accountId": "B1",
+        "authorityId": "T1",
+        "channelId": "D1",
+        "guildId": null,
+        "platform": "slack",
+        "threadId": null,
+        "topicId": "original"
+      },
+      "sourceId": "original-source",
+      "text": "unrelated effect after restart"
+    }
+  ],
+  "transport": "connection-reset",
+  "unrelated": {
+    "http": 200,
+    "ok": true,
+    "value": "remote:third"
+  }
+}

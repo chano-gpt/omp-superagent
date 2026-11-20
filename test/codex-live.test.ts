@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openCodexLive } from "../src/codex-live";
+import { openCodexLive } from "./oracles/bun-gateway/codex-live";
 
 const speech = Buffer.alloc(960).fill(Buffer.from([0x10, 0x10]));
 const posted = Buffer.from([1, 0]);

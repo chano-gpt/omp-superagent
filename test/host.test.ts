@@ -7,7 +7,7 @@ import { PassThrough } from "node:stream";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { buildHostArgs, connect, HostConnection, HostStartError, startHost, type HostFrame, type HostOptions } from "../src/host";
 import { HostChannel, HostRequestTimeout, serviceCompletionRecorded } from "../src/host-protocol";
-import { prepareHostFixture, stopHostFixtures, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
+import { assertResidentFixtureOwner, stopHostFixtures, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 import { writeStockHostExecutable } from "./fixtures/stock-host";
 
 test("adapter correlation times out without replay and still observes a late original response", async () => {
@@ -76,7 +76,6 @@ async function directory(launchesHost = false): Promise<string> {
     await fs.rm(result, { recursive: true, force: true });
   });
   await fs.chmod(result, 0o700);
-  if (launchesHost) await prepareHostFixture(result);
   await fs.writeFile(path.join(result, "extension.ts"), "export default function () {}\n");
   return result;
 }
@@ -165,6 +164,16 @@ test("connect negotiates through public RpcClient and probes the live session", 
   cleanups.push(() => connection.close());
   expect(host.received.map(frame => frame.type)).toEqual(["negotiate_protocol", "get_state"]);
   expect((await connection.client.getState()).sessionFile).toBe(host.sessionFile);
+});
+
+test("managed attachment to an older owner does not try to change its native event filter", async () => {
+  const host = await fixture();
+  const connection = await HostConnection.connectForActivity(host.socketPath);
+  cleanups.push(() => connection.close());
+  expect((await connection.client.getState()).sessionFile).toBe(host.sessionFile);
+  expect(host.received.map(frame => frame.type)).toEqual([
+    "negotiate_protocol", "get_state", "get_host_admission", "get_state",
+  ]);
 });
 
 test("caller-persisted prompt ids correlate acknowledgement and completion", async () => {
@@ -310,10 +319,100 @@ function options(root: string): HostOptions {
   };
 }
 
+test("managed activity projection does not withhold snapshots from a later plain RpcClient subscriber", async () => {
+  const root = await directory(true);
+  const launch = options(root);
+  const messageId = "msg-1";
+  const message = { role: "assistant", content: [{ type: "text", text: "partial 🌊".repeat(256) }] };
+  const update = { type: "message_update", messageId, message,
+    assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "🌊", partial: message } };
+  const final = { ...message, stopReason: "stop" };
+  const done = { type: "message_update", messageId, message: final,
+    assistantMessageEvent: { type: "done", reason: "stop", message: final } };
+  const started = { type: "message_start", messageId, message: { ...message, content: [] } };
+  const notice = { type: "extension_ui_request", id: "projection-notice", method: "notify", message: "Activity present" };
+  const ended = { type: "message_end", messageId, message: final };
+  const terminal = { type: "agent_end", messages: [final] };
+  const settled = { type: "session_settled" };
+  const nativeFrames = [started, update, notice, done, ended, terminal, settled];
+  await writeStockHostExecutable(launch.command[0]!, `
+import { recordHostFixture } from ${JSON.stringify(path.resolve(import.meta.dir, "fixtures/host-fixture-processes.ts"))};
+import { stockHostFixture } from ${JSON.stringify(path.resolve(import.meta.dir, "fixtures/stock-host.ts"))};
+recordHostFixture(${JSON.stringify(root)});
+const frames = ${JSON.stringify(nativeFrames)};
+const sessionEvents = new Set(["message_start", "message_update", "message_end", "agent_end"]);
+let events = null;
+let messageUpdates = "full";
+await stockHostFixture({
+  sessionFile: process.argv[process.argv.indexOf("--session") + 1],
+  handle(command, native) {
+    if (command.type === "set_event_filter") {
+      events = command.events;
+      messageUpdates = command.messageUpdates ?? "full";
+      return { data: { events, messageUpdates } };
+    }
+    if (command.type !== "get_projection_fixture") return;
+    for (const frame of frames) {
+      if (events !== null && sessionEvents.has(frame.type) && !events.includes(frame.type)) continue;
+      if (messageUpdates === "delta" && frame.assistantMessageEvent?.type === "text_delta") {
+        const { partial, ...increment } = frame.assistantMessageEvent;
+        native.send({ ...frame, message: { role: "assistant" }, assistantMessageEvent: increment });
+      } else native.send(frame);
+    }
+    return { data: { emitted: true } };
+  },
+});
+`);
+  await startFixtureHost(launch);
+  const managed = await HostConnection.connectForActivity(launch.socketPath);
+  cleanups.push(() => managed.close());
+  const plain = await HostConnection.connect(launch.socketPath);
+  cleanups.push(() => plain.close());
+
+  const sdkUpdates: unknown[] = [];
+  const unsubscribe = plain.client.onSessionEvent(event => {
+    if (event.type === "message_update") sdkUpdates.push(event);
+  });
+  cleanups.push(async () => { unsubscribe(); });
+  const watch = (connection: HostConnection) => {
+    const seen: HostFrame[] = [];
+    const events = new EventEmitter();
+    const off = connection.onFrame(frame => {
+      if (frame.type === "response") return;
+      seen.push(frame);
+      events.emit("frame", frame);
+    });
+    cleanups.push(async () => { off(); });
+    return nextFrame(events, "frame", frame => frame.type === "session_settled")
+      .then(() => seen).finally(off);
+  };
+  const emit = async (id: string) => {
+    const [compact, full, receipt] = await Promise.all([
+      watch(managed),
+      watch(plain),
+      managed.request({ type: "get_projection_fixture" }, id),
+    ]);
+    expect(receipt).toMatchObject({ id, success: true, data: { emitted: true } });
+    return { compact, full };
+  };
+  const managedFrames = [started, { type: "host_message_update_activity", messageId },
+    notice, done, ended, terminal, settled];
+  expect(await emit("projection-default")).toEqual({ compact: managedFrames, full: nativeFrames });
+
+  // Explicit stock filters still belong to the native publisher. The reset
+  // acknowledges native state and does not reset the private peer projection.
+  expect(await plain.client.setEventFilter(["message_end"])).toEqual(["message_end"]);
+  expect(sdkUpdates).toEqual([update, done]);
+  const filtered = [notice, ended, settled];
+  expect(await emit("projection-stock-filtered")).toEqual({ compact: filtered, full: filtered });
+  expect(await plain.client.setEventFilter(null)).toBeNull();
+  expect(await emit("projection-stock-reset")).toEqual({ compact: managedFrames, full: nativeFrames });
+}, 60_000);
+
 test("buildHostArgs keeps explicit persistence, native RPC UI, cwd, extension, and scoped configuration", async () => {
   const root = await directory();
   const launch = options(root);
-  expect(buildHostArgs(launch)).toEqual([
+  expect(await buildHostArgs(launch)).toEqual([
     "--mode", "rpc-ui",
     "--session", launch.sessionFile, "--cwd", root,
     "-e", path.resolve(import.meta.dir, "..") + path.sep,
@@ -322,19 +421,20 @@ test("buildHostArgs keeps explicit persistence, native RPC UI, cwd, extension, a
     "-e", path.resolve(import.meta.dir, "../src/host-extension.ts"),
     "--config", `${launch.socketPath}.config.json`,
   ]);
-  expect(() => buildHostArgs({ ...launch, sessionFile: "" })).toThrow("sessionFile");
-  expect(() => buildHostArgs({ ...launch, socketPath: `/${"x".repeat(100)}` })).toThrow("100 bytes");
-  expect(() => buildHostArgs({ ...launch, subagentConcurrency: 0 })).toThrow("positive integer");
-  expect(() => buildHostArgs({ ...launch, command: [] })).toThrow("argv");
-  expect(() => buildHostArgs({ ...launch, managedUlwPath: root })).toThrow();
+  await expect(buildHostArgs({ ...launch, sessionFile: "" })).rejects.toThrow("sessionFile");
+  await expect(buildHostArgs({ ...launch, socketPath: `/${"x".repeat(100)}` })).rejects.toThrow("100 bytes");
+  await expect(buildHostArgs({ ...launch, subagentConcurrency: 0 })).rejects.toThrow("positive integer");
+  await expect(buildHostArgs({ ...launch, command: [] })).rejects.toThrow("argv");
+  await expect(buildHostArgs({ ...launch, managedUlwPath: root })).rejects.toThrow();
+  await expect(buildHostArgs({ ...launch, modelPreset: { name: "invalid preset", preset: { modelRoles: {} } } })).rejects.toThrow("valid name");
   const inherited = { ...launch, managedUlwPath: undefined, env: {
     OMP_SUPERAGENT_MANAGED_ULW_PATH: "/must-not-select-a-parent-host-revision",
     OMP_SUPERAGENT_TEST_MANAGED_ULW_PATH: launch.managedUlwPath!,
   } };
-  const args = buildHostArgs(inherited);
+  const args = await buildHostArgs(inherited);
   expect(args.filter(value => value === launch.managedUlwPath)).toHaveLength(1);
   expect(args).not.toContain("/must-not-select-a-parent-host-revision");
-  expect(buildHostArgs(launch, `${launch.socketPath}.config.json`, {
+  expect(await buildHostArgs(launch, `${launch.socketPath}.config.json`, {
     extensionPaths: [launch.extensionPath], noExtensions: true,
   })).toEqual(["--mode", "rpc-ui", "--session", launch.sessionFile, "--cwd", root,
     "--no-extensions", "-e", launch.extensionPath, "--config", `${launch.socketPath}.config.json`]);
@@ -400,8 +500,44 @@ await stockHostFixture({
   expect(pid).not.toBe(ownerPid);
   // Native control remains live even when the owner's shutdown closes its pipes.
   expect(() => process.kill(pid, 0)).not.toThrow();
-  await stopHostFixtures(root);
-  await waitForFixtureProcessExit([pid, ownerPid]);
+  const unrelated = Bun.spawn([process.execPath, "--no-env-file", "-e", "process.stdin.pipe(process.stdout)"], {
+    env: { OMP_TEST_HOST_FIXTURE_ROOT: root },
+    stdin: "pipe", stdout: "pipe", stderr: "inherit",
+  });
+  try {
+    await stopHostFixtures(root);
+    await waitForFixtureProcessExit([pid, ownerPid]);
+    unrelated.stdin.write("unregistered process survives cleanup");
+    unrelated.stdin.end();
+    expect(await new Response(unrelated.stdout).text()).toBe("unregistered process survives cleanup");
+    expect(await unrelated.exited).toBe(0);
+  } finally {
+    if (unrelated.exitCode === null && unrelated.signalCode === null) unrelated.kill();
+    await unrelated.exited;
+  }
+}, 60_000);
+
+test("exit persistence does not depend on a lane checkout still being at its original path", async () => {
+  const root = await directory(true);
+  const launch = { ...options(root), cwd: path.join(root, "checkout") };
+  await fs.mkdir(launch.cwd);
+  await writeStockHostExecutable(launch.command[0]!, `
+import { recordHostFixture } from ${JSON.stringify(path.resolve(import.meta.dir, "fixtures/host-fixture-processes.ts"))};
+import { stockHostFixture } from ${JSON.stringify(path.resolve(import.meta.dir, "fixtures/stock-host.ts"))};
+recordHostFixture(${JSON.stringify(root)});
+await stockHostFixture({ sessionFile: process.argv[process.argv.indexOf("--session") + 1] });
+`);
+  const { pid } = await startFixtureHost(launch);
+  const connection = await connect(launch.socketPath);
+  try {
+    const state = await connection.client.getState();
+    await fs.rename(launch.cwd, path.join(root, "moved"));
+    expect(await connection.request({ type: "shutdown_host" })).toMatchObject({ success: true });
+    await waitForFixtureProcessExit([pid, state.adapterOwnerPid]);
+    expect(await Bun.file(`${launch.socketPath}.exit.json`).json()).toMatchObject({
+      pid, ownerPid: state.adapterOwnerPid, sessionId: state.sessionId, persisted: true, observationsFlushed: true,
+    });
+  } finally { await connection.close(); }
 }, 60_000);
 
 test("detached Host preserves launch configuration and reconnects to the same private, ready peer", async () => {
@@ -467,6 +603,7 @@ await stockHostFixture({ sessionFile, beforeReady: async () => {
     const identity = await reattached.client.getState();
     expect(identity.hostPid).toBe(pid);
     expect(identity.adapterOwnerPid).not.toBe(pid);
+    await assertResidentFixtureOwner(root, { nativePid: pid, ownerPid: identity.adapterOwnerPid });
     expect(await reattached.request({ type: "shutdown_host" })).toMatchObject({ success: true });
     await Promise.race([reattached.exited, once(AbortSignal.timeout(5_000), "abort").then(() => {
       throw new Error("Host acknowledged shutdown but did not disconnect");

@@ -1,0 +1,12 @@
+{
+  "schema": "rust-anything/app-cases@1",
+  "name": "gateway-fixture",
+  "run": [
+    "bun",
+    "--no-env-file",
+    "--no-install",
+    "./probe.ts",
+    "native"
+  ],
+  "timeout_secs": 25
+}

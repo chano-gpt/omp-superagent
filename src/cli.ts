@@ -4,13 +4,13 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { configuredPlatforms, credentialEnvNames, hostPaths, loadConfig, requireMessengerCredentials } from "./config";
 import { inspectInstalledOmp } from "./installed-omp";
+import { requireHostOwner } from "./host-owner-path";
 import { loadCredentials } from "./credentials";
 import type { Lane } from "./contracts";
 import { readLaneRows } from "./lane-rows";
-import { setup } from "./setup";
 
-// Lifecycle imports below must stay lazy: static Gateway/Host imports execute
-// OMP's dotenv loader before setup/doctor/command registration select credential sources.
+// Keep Host/SDK imports out of setup, doctor and command registration:
+// OMP's dotenv loader must not choose their credential sources.
 const HELP = `omp-sa — messenger-connected OMP head and independent topic sessions
 
 Usage:
@@ -153,7 +153,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log(JSON.stringify(await (command === "install" ? installAutostart(config) : uninstallAutostart(config)), null, 2));
     return;
   }
-  if (command === "setup") { await setup(args[configAt + 1]!); return; }
+  if (command === "setup") {
+    const { setup } = await import("./setup");
+    await setup(args[configAt + 1]!);
+    return;
+  }
   if (command === "discord-commands" || command === "telegram-commands" || command === "slack-commands") {
     const extra = command === "telegram-commands" ? " [--language CODE]"
       : command === "slack-commands" ? " --manifest-token-env NAME" : "";
@@ -193,11 +197,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const target = args[1] && !args[1]!.startsWith("-") ? args[1]! : "main";
   const paths = hostPaths(config, target);
   if (command === "doctor") {
+    const { requireGateway } = await import("./gateway-native");
     loadCredentials(config);
     const omp = await inspectInstalledOmp(config.command, credentialEnvNames(config));
     console.log(JSON.stringify({
       config: config.path, command: config.command, headCwd: config.headCwd,
-      omp, nativeTuiAttach: false,
+      omp, hostOwnerExecutable: await requireHostOwner(), gatewayExecutable: await requireGateway(), nativeTuiAttach: false,
       maxHosts: config.maxHosts, maxSubagents: config.maxSubagents,
       platforms: configuredPlatforms(config),
       credentials: Object.fromEntries(credentialEnvNames(config).map(name => [name, Boolean(process.env[name])])),
@@ -225,7 +230,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     throw new Error("Unknown managed lane");
   if (command === "stop") {
     if (target === "main") {
-      const { stopGateway } = await import("./gateway");
+      const { stopGateway } = await import("./gateway-native");
       await stopGateway(config);
       console.log("Gateway and supervised main host accepted graceful shutdown.");
       return;
@@ -241,10 +246,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   }
   if (target !== "main") throw new Error("start only activates the Gateway/main service; lanes remain head-owned");
   loadCredentials(config);
-  // Resolve required messenger credentials before native imports can populate env
-  // from their own project/provider configuration. Other native settings stay native.
+  // Only pass validated messenger credentials to the native launcher.
   requireMessengerCredentials(config);
-  const { gatewayPaths, launchGateway } = await import("./gateway");
+  const { gatewayPaths } = await import("./gateway-protocol");
+  const { launchGateway } = await import("./gateway-native");
   const status = await launchGateway(config);
   console.log(JSON.stringify({ ...status, gatewaySocketPath: gatewayPaths(config).socketPath,
     gatewayLogPath: gatewayPaths(config).logPath,

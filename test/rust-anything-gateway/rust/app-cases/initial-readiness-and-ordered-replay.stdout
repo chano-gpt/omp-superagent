@@ -1,0 +1,226 @@
+{
+  "activity": [
+    {
+      "activity": "received",
+      "messageId": "1750000000.000001",
+      "route": {
+        "accountId": "B1",
+        "authorityId": "T1",
+        "channelId": "D1",
+        "guildId": null,
+        "platform": "slack",
+        "threadId": null,
+        "topicId": "original"
+      }
+    },
+    {
+      "activity": "received",
+      "messageId": "1750000000.000002",
+      "route": {
+        "accountId": "B1",
+        "authorityId": "T1",
+        "channelId": "D1",
+        "guildId": null,
+        "platform": "slack",
+        "threadId": null,
+        "topicId": "original"
+      }
+    },
+    {
+      "activity": "received",
+      "messageId": "1750000000.000003",
+      "route": {
+        "accountId": "B1",
+        "authorityId": "T1",
+        "channelId": "D1",
+        "guildId": null,
+        "platform": "slack",
+        "threadId": null,
+        "topicId": "original"
+      }
+    }
+  ],
+  "competing": {
+    "certainty": "rejected",
+    "error": "A head client is already attached",
+    "http": 400,
+    "ok": false
+  },
+  "conflict": {
+    "admitted": false,
+    "conflict": true
+  },
+  "currentRoute": {
+    "http": 200,
+    "ok": true
+  },
+  "delivered": {
+    "event": {
+      "input": {
+        "attachments": [],
+        "id": "slack:B1:D1:1750000000.000001",
+        "messageId": "1750000000.000001",
+        "receivedAt": 100,
+        "route": {
+          "accountId": "B1",
+          "authorityId": "T1",
+          "channelId": "D1",
+          "guildId": null,
+          "platform": "slack",
+          "threadId": null,
+          "topicId": "original"
+        },
+        "text": "original"
+      },
+      "kind": "message"
+    },
+    "sequence": 2
+  },
+  "detached": {
+    "gateway": {
+      "admissionReady": true,
+      "pendingEvents": 2,
+      "ready": true,
+      "stopping": false,
+      "unresolvedEvents": 0
+    },
+    "head": {
+      "connected": false,
+      "ready": false
+    }
+  },
+  "detachedReceipt": {
+    "certainty": "rejected",
+    "error": "Gateway client is detached",
+    "http": 400,
+    "ok": false
+  },
+  "duplicate": {
+    "admitted": true
+  },
+  "following": {
+    "event": {
+      "input": {
+        "attachments": [],
+        "id": "slack:B1:D1:1750000000.000003",
+        "messageId": "1750000000.000003",
+        "receivedAt": 100,
+        "route": {
+          "accountId": "B1",
+          "authorityId": "T1",
+          "channelId": "D1",
+          "guildId": null,
+          "platform": "slack",
+          "threadId": null,
+          "topicId": "original"
+        },
+        "text": "following message"
+      },
+      "kind": "message"
+    },
+    "sequence": 4
+  },
+  "foreign": {
+    "certainty": "rejected",
+    "error": "Fixture head identity rejected",
+    "http": 400,
+    "ok": false
+  },
+  "foreignRoute": {
+    "certainty": "rejected",
+    "error": "Fixture route identity rejected",
+    "http": 400,
+    "ok": false
+  },
+  "fresh": {
+    "admitted": true
+  },
+  "held": {
+    "gateway": {
+      "admissionReady": false,
+      "pendingEvents": 1,
+      "ready": true,
+      "stopping": false,
+      "unresolvedEvents": 0
+    },
+    "head": {
+      "connected": true,
+      "ready": false
+    }
+  },
+  "heldRoute": {
+    "certainty": "rejected",
+    "error": "Authenticated messenger route is not ready",
+    "http": 400,
+    "ok": false
+  },
+  "malformed": {
+    "certainty": "rejected",
+    "error": "Invalid Gateway admission receipt",
+    "http": 400,
+    "ok": false
+  },
+  "mismatched": {
+    "certainty": "rejected",
+    "error": "Gateway receipt is not the outstanding event",
+    "http": 400,
+    "ok": false
+  },
+  "noToken": {
+    "certainty": "rejected",
+    "error": "Gateway head authorization required",
+    "http": 400,
+    "ok": false
+  },
+  "pendingRoute": {
+    "certainty": "rejected",
+    "error": "Gateway intake is still pending",
+    "http": 400,
+    "ok": false
+  },
+  "reconciliation": {
+    "event": {
+      "barrier": "$observed-barrier",
+      "kind": "reconnect"
+    },
+    "sequence": 1
+  },
+  "redeliveredAfterReceipt": {
+    "admitted": true
+  },
+  "replay": {
+    "event": {
+      "input": {
+        "attachments": [],
+        "id": "slack:B1:D1:1750000000.000002",
+        "messageId": "1750000000.000002",
+        "receivedAt": 100,
+        "route": {
+          "accountId": "B1",
+          "authorityId": "T1",
+          "channelId": "D1",
+          "guildId": null,
+          "platform": "slack",
+          "threadId": null,
+          "topicId": "original"
+        },
+        "text": "while detached"
+      },
+      "kind": "message"
+    },
+    "sequence": 3
+  },
+  "settled": {
+    "gateway": {
+      "admissionReady": true,
+      "pendingEvents": 0,
+      "ready": true,
+      "stopping": false,
+      "unresolvedEvents": 0
+    },
+    "head": {
+      "connected": true,
+      "ready": true
+    }
+  }
+}

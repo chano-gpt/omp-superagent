@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { ChannelType, Collection, MessageType, type Message } from "discord.js";
-import { DiscordVoice } from "../src/discord-voice";
+import { DiscordVoice } from "./oracles/bun-gateway/discord-voice";
 import type { Route } from "../src/contracts";
-import type { openLive } from "../src/openai-live";
-import type { openVoiceLink } from "../src/discord-voice-link";
+import type { openLive } from "./oracles/bun-gateway/openai-live";
+import type { openVoiceLink } from "./oracles/bun-gateway/discord-voice-link";
 
 test.each(["api", "subscription", "subscription rejected"] as const)("%s: explicit voice start uses only the selected provider and keeps work bound to written confirmation", async mode => {
   const route: Route = { platform: "discord", accountId: "11", authorityId: "22", guildId: "33", channelId: "44", threadId: null };

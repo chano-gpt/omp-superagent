@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Approval, Attachment, DialogResponse, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Platform, Route } from "../src/contracts";
-import { MessengerHub } from "../src/messengers";
+import { MessengerHub } from "./oracles/bun-gateway/messengers";
 
 class Transport implements Messenger {
   handlers?: Parameters<Messenger["start"]>[0];

@@ -2,6 +2,10 @@ node_modules/
 .upstream/
 coverage/
 dist/
+/host-owner/target/
+/host-owner/bin/
+/gateway/target/
+/gateway/bin/
 .env
 .env.*
 *.env

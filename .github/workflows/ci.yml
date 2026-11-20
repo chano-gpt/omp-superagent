@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUST_VERSION: '1.99.1'
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
@@ -34,20 +37,189 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      - name: Select Rust toolchain and check CMake
+        run: |
+          rustup default "$RUST_VERSION"
+          cmake --version
+      - name: Test the Rust Host owner
+        run: cargo test --locked --manifest-path host-owner/Cargo.toml
+      - name: Test the Rust Gateway
+        run: cargo test --locked --manifest-path gateway/Cargo.toml
       - name: Install and test with the SDK-matched OMP release
         run: bun run test:baseline
+      - name: Replay the original Host owner and Gateway oracles
+        if: matrix.os == 'macos-15'
+        shell: bash
+        run: |
+          name=rust-anything-v2.1.0-aarch64-apple-darwin
+          mkdir "$RUNNER_TEMP/owner-oracle"
+          curl -fsSL "https://github.com/erkamyaman/rust-anything/releases/download/v2.1.0/$name.tar.gz" -o "$RUNNER_TEMP/owner-oracle/$name.tar.gz"
+          (cd "$RUNNER_TEMP/owner-oracle" && echo "ee0ae5766bbd51a8619c5ec2e63f7786cd86cbc12e475ed296aa303a55e241ec  $name.tar.gz" | shasum -a 256 -c - && tar -xzf "$name.tar.gz")
+          "$RUNNER_TEMP/owner-oracle/$name/rust-anything" app replay test/rust-anything
+          "$RUNNER_TEMP/owner-oracle/$name/rust-anything" app replay test/rust-anything-gateway
       - name: Test with stock OMP 18
         run: bash scripts/test-omp.sh v18.22.2
       - name: Test the earlier OMP 18 native lifecycle
         if: matrix.os == 'ubuntu-24.04'
         run: bash scripts/test-omp.sh v18.20.3
-      - name: Package committed source
+
+  build-native:
+    name: Build Host owner and Gateway (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x64 }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64 }
+          - { os: macos-15-intel, platform: darwin-x64 }
+          - { os: macos-15, platform: darwin-arm64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Install the Rust target and copyright notices
+        shell: bash
+        run: |
+          rustup default "$RUST_VERSION"
+          rustup component add rust-docs
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            rustup target add "$(uname -m)-unknown-linux-musl"
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends musl-tools
+          fi
+          cmake --version
+      - name: Build and stage both native binaries with notices
+        shell: bash
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          test "$(bun --no-env-file -p '`${process.platform}-${process.arch}`')" = "$NATIVE_PLATFORM"
+          bun run build:native --package
+          owner="host-owner/bin/omp-host-owner-$NATIVE_PLATFORM"
+          gateway="gateway/bin/omp-gateway-$NATIVE_PLATFORM"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            # No dynamic interpreter or host libraries, including libopus/SQLite.
+            for binary in "$owner" "$gateway"; do
+              headers=$(readelf -l "$binary")
+              dynamic=$(readelf -d "$binary")
+              if grep -q INTERP <<< "$headers" || grep -q '(NEEDED)' <<< "$dynamic"; then
+                echo "The packaged Linux executable is not static: $binary" >&2
+                exit 1
+              fi
+            done
+          else
+            for binary in "$owner" "$gateway"; do
+              # macOS may link system libraries, never Homebrew or runner paths.
+              otool -L "$binary" | awk 'NR > 1 && $1 !~ /^\/(usr\/lib|System\/Library)\// { print; bad = 1 } END { exit bad }'
+            done
+            # Assert the Gateway actually uses Apple's SQLite, not the amalgamation.
+            otool -L "$gateway" | awk '$1 == "/usr/lib/libsqlite3.dylib" { found = 1 } END { exit !found }'
+          fi
+          # Actions artifacts do not preserve mode bits by themselves.
+          tar -czf "$RUNNER_TEMP/native-$NATIVE_PLATFORM.tar.gz" \
+            "$owner" "host-owner/bin/notices/$NATIVE_PLATFORM" \
+            "$gateway" "gateway/bin/notices/$NATIVE_PLATFORM"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+
+  package:
+    name: Package committed source and native npm binaries
+    needs: build-native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: ${{ runner.temp }}/native-builds
+          merge-multiple: true
+      - name: Assemble all four targets
+        run: |
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            tar -xzf "$RUNNER_TEMP/native-builds/native-$platform.tar.gz"
+          done
+      - name: Check and package both distributions
         run: bun run release
       - uses: actions/upload-artifact@v4
         with:
-          name: source-${{ matrix.os }}
+          name: distributions
           path: dist/*
           if-no-files-found: error
+
+  verify-package:
+    name: Install and run npm payload (${{ matrix.platform }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x64, installer: npm }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64, installer: bun }
+          - { os: macos-15-intel, platform: darwin-x64, installer: bun }
+          - { os: macos-15, platform: darwin-arm64, installer: bun }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: ${{ runner.temp }}/distributions
+      - name: Install without OMP and exercise both shipped executables
+        shell: bash
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          test "$(bun --no-env-file -p '`${process.platform}-${process.arch}`')" = "$NATIVE_PLATFORM"
+          if command -v omp >/dev/null; then
+            echo "Package installation check expects no OMP CLI on PATH" >&2
+            exit 1
+          fi
+          filename=$(bun --no-env-file -p 'const { name, version } = require("./package.json"); `${name}-${version}.tgz`')
+          archive="$RUNNER_TEMP/distributions/$filename"
+          mkdir "$RUNNER_TEMP/native-install"
+          cd "$RUNNER_TEMP/native-install"
+          printf '{"private":true}\n' > package.json
+          if [[ "$INSTALLER" == npm ]]; then
+            npm install --no-audit --no-fund --foreground-scripts "$archive"
+          else
+            bun add --trust "$archive"
+          fi
+          ./node_modules/.bin/omp-sa --help
+          bun=$(command -v bun)
+          (
+            cd node_modules/omp-superagent
+            PATH="$(dirname "$bun")" "$bun" --no-env-file scripts/build-host-owner.ts --install
+          )
+          owner="node_modules/omp-superagent/host-owner/bin/omp-host-owner-$NATIVE_PLATFORM"
+          test -x "$owner"
+          status=0
+          output=$("$owner" 2>&1) || status=$?
+          if [[ "$status" != 1 || "$output" != *'Usage: omp-host-owner <absolute owner.json>'* ]]; then
+            printf 'Installed owner failed its CLI smoke (status %s):\n%s\n' "$status" "$output" >&2
+            exit 1
+          fi
+          gateway="node_modules/omp-superagent/gateway/bin/omp-gateway-$NATIVE_PLATFORM"
+          test -x "$gateway"
+          output=$("$gateway" --help)
+          if [[ "$output" != *'omp-gateway (managed by omp-sa)'* || "$output" != *'launch --config FILE'* ]]; then
+            printf 'Installed Gateway failed its CLI smoke:\n%s\n' "$output" >&2
+            exit 1
+          fi
 
   release:
     name: Publish GitHub Release
@@ -55,7 +227,7 @@ jobs:
       github.ref_type == 'tag' &&
       ((github.event_name == 'push' && !github.event.forced) ||
        (github.event_name == 'workflow_dispatch' && inputs.replace_release))
-    needs: test
+    needs: [test, verify-package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -64,6 +236,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
       - name: Publish verified tag
         env:
           GH_TOKEN: ${{ github.token }}

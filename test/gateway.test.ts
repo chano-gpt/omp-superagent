@@ -7,11 +7,12 @@ import type { Config } from "../src/config";
 import type { Approval, Attachment, GatewayRestartNotice, GatewayRestartRecord, GatewayRestartRequest, Inbound, MessageActivity, MessageReference, Messenger, OutputRecord, Route } from "../src/contracts";
 import { DeliveryError } from "../src/delivery";
 import { changeDiscordPurpose } from "../src/discord-context";
-import { MessengerHub } from "../src/messengers";
+import { MessengerHub } from "./oracles/bun-gateway/messengers";
 import { createGatewayMessenger } from "../src/gateway-client";
 import { gatewayCall, gatewayPaths, gatewayRequest, readGatewayJson, type GatewayResult } from "../src/gateway-protocol";
-import { GatewayServer, type GatewayStatus } from "../src/gateway-server";
-import { GatewayStore } from "../src/gateway-store";
+import { GatewayServer } from "./oracles/bun-gateway/gateway-server";
+import type { GatewayStatus } from "../src/gateway-wire";
+import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
 import { Store } from "../src/store";
 import { decisionId, decisionViews } from "../src/decisions";
 

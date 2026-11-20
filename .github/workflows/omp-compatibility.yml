@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUST_VERSION: '1.99.1'
+
 jobs:
   upstream:
     runs-on: ubuntu-24.04
@@ -36,6 +39,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      - name: Select Rust toolchain and check CMake
+        run: |
+          rustup default "$RUST_VERSION"
+          cmake --version
       - name: Install and test the upstream release without fallback
         env:
           OMP_TAG: ${{ needs.upstream.outputs.tag }}

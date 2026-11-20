@@ -1,0 +1,3 @@
+{"name":"initial-readiness-and-ordered-replay","args":["admission"]}
+{"name":"approval-reconciliation-and-closure","args":["approval"]}
+{"name":"completed-and-lost-effects","args":["effects"]}

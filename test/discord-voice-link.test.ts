@@ -7,7 +7,7 @@ import {
 } from "@discordjs/voice";
 import { Client, Collection, Events, GatewayIntentBits, type Guild, type VoiceChannel, type VoiceState } from "discord.js";
 import OpusScript from "opusscript";
-import { openVoiceLink } from "../src/discord-voice-link.ts";
+import { openVoiceLink } from "./oracles/bun-gateway/discord-voice-link.ts";
 
 const owner = "100000000000000001";
 const bot = "100000000000000002";

@@ -1,0 +1,12 @@
+{
+  "schema": "rust-anything/app-cases@1",
+  "name": "owner-fixture",
+  "run": [
+    "bun",
+    "--no-env-file",
+    "--no-install",
+    "./owner-probe.ts",
+    "rust"
+  ],
+  "timeout_secs": 25
+}

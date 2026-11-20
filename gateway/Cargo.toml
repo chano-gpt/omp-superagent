@@ -1,0 +1,51 @@
+[package]
+name = "omp-gateway"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+davey = "0.2.0"
+futures-util = "0.3"
+hex = "0.4"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+nix = { version = "0.30", features = ["signal", "process", "user", "fs"] }
+opus2 = { version = "0.4", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+time = { version = "0.3", features = ["parsing", "formatting"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+url = "2"
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4"] }
+
+# Match Bun's Darwin SQLite VFS: it preserves the WAL sidecars needed by
+# read-only operator queries after the final Gateway/HEAD writer exits.
+[target.'cfg(target_os = "macos")'.dependencies]
+rusqlite = "0.37"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[build-dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+openmls = "0.8.1"
+openmls_basic_credential = "0.5"
+openmls_rust_crypto = "0.5.1"
+
+[profile.release]
+strip = true

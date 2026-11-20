@@ -1,0 +1,380 @@
+use serde_json::{Value, json};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::sync::mpsc;
+
+use super::outputs::attachment_url;
+use super::rest::broken;
+use super::voice::Command;
+use super::{
+    Effect, EffectError, State,
+    model::{
+        Channel, Message, ReferencedMessage, Route, User, actual_guild, hash, snowflake,
+        snowflake_time,
+    },
+};
+
+const VOICE_DRAFT_HEADER: &str = "Proposed work from the live voice session (not yet submitted).\n";
+
+fn edit_time(text: &str) -> Option<i64> {
+    let epoch = OffsetDateTime::parse(text, &Rfc3339)
+        .ok()?
+        .unix_timestamp_nanos();
+    i64::try_from(epoch / 1_000_000).ok()
+}
+
+fn attachment_values(message: &Message) -> Vec<Value> {
+    message
+        .attachments
+        .iter()
+        .filter_map(|file| {
+            let url = attachment_url(&file.url)?;
+            let mut segments = url.path_segments()?.skip(1);
+            if file.size > 9_007_199_254_740_991
+                || segments.next() != Some(message.channel_id.as_str())
+                || segments.next() != Some(file.id.as_str())
+            {
+                return None;
+            }
+            let mut value =
+                json!({ "id": file.id, "name": file.filename, "url": file.url, "size": file.size });
+            if let Some(content) = file.content_type.as_ref().filter(|s| !s.is_empty()) {
+                value["contentType"] = json!(content);
+            }
+            if message.flags & (1 << 13) != 0 {
+                value["voice"] = Value::Bool(true);
+            }
+            if let Some(seconds) = file
+                .duration_secs
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            {
+                value["durationSeconds"] = json!(seconds);
+            }
+            Some(value)
+        })
+        .collect()
+}
+
+fn message_input(message: &Message, route: &Route) -> Option<Value> {
+    if message.author.id != route.authority_id
+        || message.author.bot
+        || message.webhook_id.is_some()
+        || !matches!(message.kind, 0 | 19)
+        || !message.matches(route)
+    {
+        return None;
+    }
+    let attachments = attachment_values(message);
+    if message.content.trim().is_empty() && attachments.is_empty() {
+        return None;
+    }
+    let (received_at, revision) = match &message.edited_timestamp {
+        None => (json!(snowflake_time(&message.id)?), "original".to_owned()),
+        Some(stamp) => {
+            let timestamp = edit_time(stamp)?;
+            let mut metadata: Vec<_> = attachments
+                .iter()
+                .map(|file| json!([file["id"], file["name"], file["size"], file["contentType"]]))
+                .collect();
+            metadata.sort_by(|a, b| a[0].as_str().cmp(&b[0].as_str()));
+            let digest = hash(&json!([message.content, metadata]));
+            (json!(timestamp), format!("edit:{timestamp}:{digest}"))
+        }
+    };
+    Some(json!({
+        "id": format!("discord:{}:{}:{revision}", route.account_id, message.id),
+        "route": route, "messageId": message.id, "text": message.content,
+        "receivedAt": received_at, "attachments": attachments
+    }))
+}
+
+impl State {
+    pub(super) async fn intake_candidate(&self, raw: &Value, create: bool) -> bool {
+        let Some(channel_id) = raw["channel_id"].as_str().filter(|id| snowflake(id)) else {
+            return false;
+        };
+        if !raw["id"].as_str().is_some_and(snowflake)
+            || !self.allowed_guild(raw["guild_id"].as_str())
+            || raw["webhook_id"].is_string()
+        {
+            return false;
+        }
+        match raw.get("author") {
+            Some(raw)
+                if !serde_json::from_value::<User>(raw.clone())
+                    .is_ok_and(|user| user.id == self.config.owner_id && !user.bot) =>
+            {
+                return false;
+            }
+            None if create => return false,
+            Some(_) | None => (),
+        }
+        // Most message updates are its system-owned renders or pin changes.
+        // Keep only candidates that actually report editing user content/files,
+        // including partial edit events with no author or message payload.
+        if !create
+            && raw["edited_timestamp"].is_null()
+            && raw.get("content").is_none()
+            && raw.get("attachments").is_none()
+        {
+            return false;
+        }
+        self.channels
+            .read()
+            .await
+            .get(channel_id)
+            .is_none_or(|channel| {
+                let known_guild = raw["guild_id"].as_str();
+                let exact = create || raw.get("guild_id").is_some();
+                (!exact || channel.guild_id.as_deref() == known_guild)
+                    && self.route_for(channel).is_ok()
+            })
+    }
+
+    async fn incoming_channel(
+        &self,
+        channel_id: &str,
+        guild_id: Option<&str>,
+        exact: bool,
+    ) -> Effect<Channel> {
+        if !self.allowed_guild(guild_id) {
+            return Err(EffectError::rejected("Discord guild is not authorized"));
+        }
+        let channel = self.channel_by_id(channel_id, false).await?;
+        if exact && channel.guild_id.as_deref() != guild_id {
+            return Err(EffectError::rejected(
+                "Discord event channel identity changed",
+            ));
+        }
+        Ok(channel)
+    }
+
+    async fn snapshot_reply(&self, message: &Message, route: &Route) -> Option<Value> {
+        let reference = message.message_reference.as_ref()?;
+        let id = reference.message_id.as_deref()?;
+        if message.kind != 19
+            || !snowflake(id)
+            || reference.channel_id.as_deref() != Some(route.destination())
+            || !actual_guild(reference.guild_id.as_deref(), route)
+        {
+            return None;
+        }
+        let matches = |source: &ReferencedMessage| {
+            source.id == id
+                && source.channel_id == route.destination()
+                && actual_guild(source.guild_id.as_deref(), route)
+        };
+        let fetched;
+        let source = if let Some(embedded) = message
+            .referenced_message
+            .as_deref()
+            .filter(|source| matches(source))
+        {
+            Some(embedded)
+        } else {
+            fetched = self
+                .rest
+                .get::<ReferencedMessage>(&format!(
+                    "channels/{}/messages/{id}",
+                    route.destination()
+                ))
+                .await;
+            match &fetched {
+                Ok(source) if matches(source) => Some(source),
+                // Optional context is unavailable; keep just the safe pointer.
+                Ok(_) | Err(_) => None,
+            }
+        };
+        let author = source.map(|value| &value.author.id);
+        let text = source
+            .filter(|source| {
+                source.author.id != route.account_id
+                    || !source.content.starts_with(VOICE_DRAFT_HEADER)
+            })
+            .map(|source| &source.content);
+        Some(json!({ "messageId": id, "authorId": author, "text": text }))
+    }
+
+    pub(super) async fn voice_message(
+        &self,
+        raw: &Value,
+        outbound: &mpsc::Sender<Value>,
+    ) -> Effect<()> {
+        let Some(voice) = &self.voice else {
+            return Ok(());
+        };
+        if outbound.is_closed() {
+            return Ok(());
+        }
+        let Ok(message) = serde_json::from_value::<Message>(raw.clone()) else {
+            return Ok(());
+        };
+        // Voice control must never block heartbeat or urgent revocation on a
+        // REST lookup. A live guild snapshot proves the configured text route.
+        let Some(channel) = self.channels.read().await.get(&message.channel_id).cloned() else {
+            return Ok(());
+        };
+        let route = self.route_for(&channel)?;
+        let Some(mut input) = message_input(&message, &route) else {
+            return Ok(());
+        };
+        if route.guild_id.is_none()
+            || route.guild_id != message.guild_id
+            || route.thread_id.is_some()
+            || outbound.is_closed()
+            || self.stopping.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        match voice
+            .command(raw, outbound)
+            .await
+            .map_err(|_| broken("Discord voice command failed"))?
+        {
+            Command::Ignore | Command::Consumed => (),
+            Command::Confirmed(text) => {
+                input["text"] = json!(text);
+                input["attachments"] = json!([]);
+                input["discordContext"] = self.context_snapshot(&route, Some(&channel)).await;
+                self.admit(json!({"kind": "message", "input": input}))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn message_dispatch(&self, raw: Value, create: bool) -> Effect<()> {
+        let Some(channel_id) = raw["channel_id"].as_str().filter(|id| snowflake(id)) else {
+            return Ok(());
+        };
+        let Some(id) = raw["id"].as_str().filter(|id| snowflake(id)) else {
+            return Ok(());
+        };
+        let guild = raw["guild_id"].as_str();
+        if !self.allowed_guild(guild)
+            || raw["webhook_id"].is_string()
+            || (raw["author"].is_object()
+                && !serde_json::from_value::<User>(raw["author"].clone())
+                    .is_ok_and(|user| user.id == self.config.owner_id && !user.bot))
+        {
+            return Ok(());
+        }
+        let channel = match self
+            .incoming_channel(channel_id, guild, create || raw.get("guild_id").is_some())
+            .await
+        {
+            Ok(channel) => channel,
+            Err(error) if error.certainty == "rejected" => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        // Check parent and owner policy before a partial update may fetch a message.
+        let Ok(route) = self.route_for(&channel) else {
+            return Ok(());
+        };
+        let (message, fetched_raw) = match serde_json::from_value::<Message>(raw.clone()) {
+            Ok(message)
+                if create
+                    || (raw.get("edited_timestamp").is_some()
+                        && raw.get("attachments").is_some()) =>
+            {
+                (message, None)
+            }
+            _ if create => return Ok(()),
+            _ => {
+                let found: Value = self
+                    .rest
+                    .get(&format!("channels/{channel_id}/messages/{id}"))
+                    .await?;
+                let message: Message = serde_json::from_value(found.clone())
+                    .map_err(|_| broken("Discord edit could not be verified"))?;
+                (message, Some(found))
+            }
+        };
+        // Gate controls even on partial edits whose resource omitted a guild ID.
+        if let Some(voice) = &self.voice {
+            let mut resource = fetched_raw.unwrap_or(raw.clone());
+            resource["guild_id"] = json!(route.guild_id);
+            if voice.is_control(&resource) {
+                return Ok(());
+            }
+        }
+        if message.id != id || (!create && message.edited_timestamp.is_none()) {
+            return Ok(());
+        }
+        if let Some(input) = self.with_context(&message, &route, &channel).await {
+            self.admit(json!({ "kind": "message", "input": input }))?;
+        }
+        Ok(())
+    }
+
+    async fn with_context(
+        &self,
+        message: &Message,
+        route: &Route,
+        channel: &Channel,
+    ) -> Option<Value> {
+        let mut input = message_input(message, route)?;
+        if let Some(reply) = self.snapshot_reply(message, route).await {
+            input["reply"] = reply;
+        }
+        input["discordContext"] = self.context_snapshot(route, Some(channel)).await;
+        Some(input)
+    }
+
+    pub(super) async fn fetch_after(&self, route: &Route, cursor: &str) -> Effect<Value> {
+        if !snowflake(cursor) {
+            return Err(EffectError::rejected(
+                "Catchup requires a stored Discord message snowflake",
+            ));
+        }
+        let route = route.physical();
+        let channel = self.destination(&route).await?;
+        let mut after = cursor.to_owned();
+        let mut inputs = Vec::new();
+        loop {
+            let page: Vec<Value> = self
+                .rest
+                .get(&format!(
+                    "channels/{}/messages?after={after}&limit=100",
+                    channel.id
+                ))
+                .await?;
+            let count = page.len();
+            let mut messages =
+                page.into_iter()
+                    .map(|mut raw| {
+                        let message: Message = serde_json::from_value(raw.clone())
+                            .map_err(|_| broken("Discord history contained an invalid message"))?;
+                        let id = message.id.parse::<u64>().map_err(|_| {
+                            broken("Discord history contained an invalid message ID")
+                        })?;
+                        if !message.matches(&route) {
+                            return Err(broken(
+                                "Discord history destination did not match its request",
+                            ));
+                        }
+                        raw["guild_id"] = json!(route.guild_id);
+                        Ok((id, message, raw))
+                    })
+                    .collect::<Effect<Vec<_>>>()?;
+            messages.sort_unstable_by_key(|(id, _, _)| *id);
+            let previous = after
+                .parse::<u64>()
+                .map_err(|_| broken("Discord history cursor could not be verified"))?;
+            for (id, message, raw) in messages {
+                if id <= previous {
+                    return Err(broken("Discord history cursor did not advance"));
+                }
+                after = message.id.clone();
+                if self.voice.as_ref().is_some_and(|v| v.is_control(&raw)) {
+                    continue;
+                }
+                if let Some(input) = self.with_context(&message, &route, &channel).await {
+                    inputs.push(input);
+                }
+            }
+            if count < 100 {
+                break;
+            }
+        }
+        Ok(Value::Array(inputs))
+    }
+}

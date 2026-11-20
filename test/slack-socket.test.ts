@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { LogLevel } from "@slack/web-api";
 import { SocketModeClient } from "@slack/socket-mode";
 import type { Inbound } from "../src/contracts.ts";
-import { SlackMessenger } from "../src/slack.ts";
+import { SlackMessenger } from "./oracles/bun-gateway/slack.ts";
 import { Store } from "../src/store.ts";
 
 type SocketData = { fixture: true };

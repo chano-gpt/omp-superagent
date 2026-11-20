@@ -79,7 +79,8 @@ checkout·코어 패치·네이티브 빌드가 필요하지 않습니다. 의�
 Bun 등 런타임으로 OMP 소스를 실행하는 래퍼는 지원하지 않습니다.
 
 CLI 명령어는 **`omp-sa`**이며 프로젝트·패키지 이름은 `omp-superagent`로 유지합니다.
-소스 checkout이나 소스 tarball을 사용하는 경우에는 그 루트에서 대신 실행합니다.
+소스 checkout이나 소스 tarball에서는 stable Rust/Cargo, CMake와 C 컴파일러를 준비하고 루트에서 실행합니다.
+Cargo는 Superagent의 Gateway와 Host 중계기만 빌드하며 OMP는 빌드하지 않습니다. Rust 소스 수정 후에는 `bun run build:native`로 다시 빌드합니다.
 
 ```sh
 bun install --frozen-lockfile

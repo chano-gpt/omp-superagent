@@ -1,0 +1,5 @@
+bin.name = "gateway-fixture"
+args = ["effects"]
+status.code = 0
+fs.sandbox = true
+stderr = ""

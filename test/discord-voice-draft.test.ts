@@ -3,7 +3,7 @@ import {
   ChannelType, MessageFlags, MessageReferenceType, MessageType, REST, Routes,
   type Message, type MessageReference, type TextChannel,
 } from "discord.js";
-import { VoiceDrafts } from "../src/discord-voice-draft.ts";
+import { VoiceDrafts } from "./oracles/bun-gateway/discord-voice-draft.ts";
 
 const botId = "200";
 const ownerId = "300";

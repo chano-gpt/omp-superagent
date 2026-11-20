@@ -4,7 +4,7 @@ import { MESSENGER_COMMANDS } from "./messenger-commands";
 export const SLACK_COMMANDS = MESSENGER_COMMANDS.map(command => ({
   command: `/superagent-${command.name}`,
   description: command.description,
-  ...("text" in command ? { usage_hint: command.text } : {}),
+  ...(command.text !== undefined ? { usage_hint: command.text } : {}),
   should_escape: false,
 }));
 
@@ -13,6 +13,6 @@ export function parseSlackCommand(name: string, text: string): string | null {
   const command = MESSENGER_COMMANDS.find(command => name === `/superagent-${command.name}`);
   if (!command) return null;
   const argument = text.trim();
-  if (argument && !("text" in command)) return null;
+  if (argument && command.text === undefined) return null;
   return `/${command.name}${argument ? ` ${argument}` : ""}`;
 }

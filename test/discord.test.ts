@@ -4,12 +4,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationCommandOptionType, Attachment as DiscordAttachment, AttachmentBuilder, ChannelType, Collection, Events, MessageFlags, MessageFlagsBitField, type Client, type Message, type MessageCreateOptions } from "discord.js";
-import { DiscordMessenger, deliveryError, discordAttachmentAllowed, discordNonce, parseDiscordControl, type DiscordMessengerOptions } from "../src/discord.ts";
-import { VOICE_DRAFT_HEADER } from "../src/discord-voice-draft";
+import { DiscordMessenger, deliveryError, discordAttachmentAllowed, discordNonce, parseDiscordControl, type DiscordMessengerOptions } from "./oracles/bun-gateway/discord.ts";
+import { VOICE_DRAFT_HEADER } from "./oracles/bun-gateway/discord-voice-draft";
 import { DeliveryError } from "../src/delivery.ts";
 import { parseDialog } from "../src/dialog.ts";
 import { Store } from "../src/store";
-import { GatewayStore } from "../src/gateway-store";
+import { GatewayStore } from "./oracles/bun-gateway/gateway-store";
 import { decisionId, decisionViews } from "../src/decisions";
 import { type Approval, type Attachment, type DialogResponse, type Inbound, type OutputRecord, type Route } from "../src/contracts.ts";
 

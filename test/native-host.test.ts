@@ -6,7 +6,7 @@ import { startHost, HostConnection, type HostFrame, type HostOptions } from "../
 import { nativeDisabledProviders } from "./fixtures/native-extension";
 import { serviceCompletionRecorded } from "../src/host-protocol";
 import { decisionId } from "../src/decisions";
-import { prepareHostFixture, stopHostFixtures, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
+import { assertResidentFixtureOwner, stopHostFixtures, waitForFixtureProcessExit } from "./fixtures/host-fixture-processes";
 import { nativeTestCommand } from "./fixtures/native-command";
 
 const nativeTest = process.env.OMP_SUPERAGENT_NATIVE_TEST === "1" ? test : test.skip;
@@ -115,7 +115,6 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
   const agentDirectory = path.join(root, "agent");
   const cwd = path.join(root, "workspace");
   for (const directory of [home, agentDirectory, cwd]) await fs.mkdir(directory, { mode: 0o700 });
-  await prepareHostFixture(cwd);
   const configPath = path.join(agentDirectory, "config.yml");
   await fs.writeFile(configPath, JSON.stringify({ task: { maxConcurrency: 1 }, disabledProviders: nativeDisabledProviders,
     bash: { patterns: [{ match: "printf 'superagent-service-completed\\n'", approval: "prompt" }] },
@@ -169,7 +168,9 @@ nativeTest("actual OMP preserves approvals and structured owner decisions across
     const second = await HostConnection.connect(options.socketPath);
     connections.add(second);
     const reattached = await second.client.getState();
-    expect(reattached).toMatchObject({ sessionId: initial.sessionId, sessionFile: options.sessionFile, hostPid: child.pid });
+    expect(reattached).toMatchObject({ sessionId: initial.sessionId, sessionFile: options.sessionFile, hostPid: child.pid,
+      adapterOwnerPid: initial.adapterOwnerPid });
+    await assertResidentFixtureOwner(root, { nativePid: child.pid, ownerPid: reattached.adapterOwnerPid });
     expect(reattached.pendingUiRequests).toContainEqual(expect.objectContaining({ id: dialog.id, message: "original-approval-token" }));
     expect(await second.request({ type: "shutdown_host" }, "native-still-refused-shutdown")).toMatchObject({ success: false, code: "session_busy" });
 

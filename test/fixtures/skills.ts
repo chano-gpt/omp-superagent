@@ -68,7 +68,7 @@ let networkAttempts = 0;
 const refuseNetwork = () => { networkAttempts++; throw new Error("Native skills fixture forbids network access"); };
 globalThis.fetch = Object.assign(async () => refuseNetwork(), { preconnect: refuseNetwork });
 
-const hostArgs = buildHostArgs({
+const hostArgs = await buildHostArgs({
   command: [process.execPath], socketPath: path.join(root, "proof.sock"),
   sessionFile: path.join(root, "session.jsonl"), cwd: workspace, extensionPath,
   env: {}, logPath: path.join(root, "host.log"), subagentConcurrency: 1,

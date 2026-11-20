@@ -10,7 +10,7 @@ import { lookup as lookupSetting } from "@oh-my-pi/pi-coding-agent/config/regist
 import { pickDefaultAvailableModel, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
 import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { HostChannel, serviceCompletionRecorded, type Frame, type ServiceUnit } from "./host-protocol";
+import { HostChannel, indexServiceCompletions, serviceGenerationKey, type Frame, type ServiceUnit } from "./host-protocol";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { fitAbortAndRestoreQueueResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -20,8 +20,6 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import type { LanePresetSnapshot } from "./contracts";
 
 const terminalService = (state: ServiceUnit["state"]) => state === "exited" || state === "failed";
-const generationKey = (value: Frame | ServiceUnit) =>
-  JSON.stringify([value.owner, value.id, value.generation, value.startedAt, value.restartCount]);
 const serviceGeneration = ({ owner, id, generation, startedAt, restartCount }: ServiceUnit) =>
   ({ owner, id, generation, startedAt, restartCount });
 const serviceName = (value: unknown) => typeof value === "string" ? value.trim() || undefined : undefined;
@@ -151,40 +149,76 @@ export default function hostExtension(pi: ExtensionAPI): void {
     const registry = pi.pi.AgentRegistry.global();
     const refs = registry.list();
     const refEpoch = refs.map(ref => [ref.id, ref.generation, ref.parentId, ref.session?.instanceKey, ref.sessionFile]);
-    const journal = identity.session.sessionManager.getEntries();
-    const lineage = journal.flatMap(entry => {
-      if (entry.type !== "custom" || entry.customType !== "superagent_native_descendant") return [];
-      const data = entry.data as { rootSessionId?: string; agentId?: string; parentId?: string; sessionId?: string };
-      return data?.rootSessionId === identity.id && typeof data.agentId === "string"
-        && typeof data.parentId === "string" && typeof data.sessionId === "string" ? [data] : [];
-    });
-    const agents = new Set([pi.pi.MAIN_AGENT_ID]);
-    for (let changed = true; changed;) {
-      changed = false;
-      for (const ref of refs) if (ref.parentId && agents.has(ref.parentId) && !agents.has(ref.id)) {
-        agents.add(ref.id); changed = true;
-      }
-      for (const row of lineage) if (agents.has(row.parentId!) && !agents.has(row.agentId!)) {
-        agents.add(row.agentId!); changed = true;
+    type NativeSession = InstanceType<typeof pi.pi.AgentSession>;
+    // A manager-owned view is used only during a synchronous scan. Older
+    // supported CLIs may expose only the copying API.
+    const entries = (manager: NativeSession["sessionManager"]) =>
+      typeof manager.getEntriesView === "function" ? manager.getEntriesView() : manager.getEntries();
+    const lineage: { readonly agentId: string; readonly sessionId: string; readonly sessionFile: unknown }[] = [];
+    const recordedAgents = new Set<string>();
+    const children = new Map<string, string[]>();
+    const link = (parent: string, child: string) => {
+      const siblings = children.get(parent);
+      if (siblings) siblings.push(child);
+      else children.set(parent, [child]);
+    };
+    for (const ref of refs) if (ref.parentId) link(ref.parentId, ref.id);
+    const attempts: Frame[] = [];
+    const results = new Map<unknown, Set<unknown>>();
+    const previousGenerations: (readonly unknown[])[] = [];
+    const tracked = new Map<string, Frame>();
+    const trackedOwners = new Set<string>();
+    let trackingSeen = false;
+    let journalUnknown = false;
+    for (const entry of entries(identity.session.sessionManager)) {
+      if (entry.type !== "custom") continue;
+      const data = entry.data as Frame | undefined;
+      if (data?.rootSessionId !== identity.id) continue;
+      if (entry.customType === "superagent_native_descendant") {
+        const { agentId, parentId, sessionId, sessionFile } = data;
+        if (typeof agentId !== "string" || typeof parentId !== "string" || typeof sessionId !== "string") continue;
+        lineage.push({ agentId, sessionId, sessionFile });
+        recordedAgents.add(agentId);
+        link(parentId, agentId);
+      } else if (entry.customType === "superagent_service_tracking") {
+        trackingSeen = true;
+        if (data.known !== true) journalUnknown = true;
+      } else if (entry.customType === "superagent_service_generation") {
+        if (data.uncertain === true) journalUnknown = true;
+        if (data.phase === "attempt") attempts.push(data);
+        if (data.phase === "result" && !Number.isNaN(data.owner) && !Number.isNaN(data.toolCallId)) {
+          const calls = results.get(data.owner);
+          if (calls) calls.add(data.toolCallId);
+          else results.set(data.owner, new Set([data.toolCallId]));
+        }
+        if (Array.isArray(data.previous)) previousGenerations.push(data.previous);
+        if (data.daemon && typeof data.daemon === "object") {
+          const daemon = data.daemon as Frame;
+          const key = serviceGenerationKey(daemon);
+          if (tracked.has(key)) journalUnknown = true;
+          tracked.set(key, daemon);
+          if (typeof daemon.owner === "string") trackedOwners.add(daemon.owner);
+        }
       }
     }
+    const agents = new Set([pi.pi.MAIN_AGENT_ID]);
+    // Sets visit entries added during iteration, so each reachable agent is expanded once.
+    for (const id of agents) for (const child of children.get(id) ?? []) agents.add(child);
     const owners = new Set<string>([identity.id]);
     const ownerFiles = new Map<string, string>();
     if (identity.file) ownerFiles.set(identity.id, identity.file);
-    for (const ref of refs) if (agents.has(ref.id) && ref.session)
-      {
-        const id = ref.session.sessionManager.getSessionId();
-        owners.add(id);
-        const file = ref.session.sessionManager.getSessionFile();
-        if (file) ownerFiles.set(id, file);
-      }
-    for (const row of lineage) if (agents.has(row.agentId!)) {
-      owners.add(row.sessionId!);
-      const file = (row as Frame).sessionFile;
-      if (typeof file === "string") ownerFiles.set(row.sessionId!, file);
+    for (const ref of refs) if (agents.has(ref.id) && ref.session) {
+      const id = ref.session.sessionManager.getSessionId();
+      owners.add(id);
+      const file = ref.session.sessionManager.getSessionFile();
+      if (file) ownerFiles.set(id, file);
+    }
+    for (const row of lineage) if (agents.has(row.agentId)) {
+      owners.add(row.sessionId);
+      if (typeof row.sessionFile === "string") ownerFiles.set(row.sessionId, row.sessionFile);
     }
     for (const ref of refs) if (agents.has(ref.id) && !ref.session
-      && !lineage.some(row => row.agentId === ref.id)) {
+      && !recordedAgents.has(ref.id)) {
       if (!ref.sessionFile) throw new Error("Detached descendant service ownership cannot be established");
       const id = await readSessionHeaderId(ref.sessionFile);
       if (!id) throw new Error("Detached descendant session identity is unavailable");
@@ -204,11 +238,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     if (exact().ref !== identity.ref || currentRefs.length !== refs.length
       || refs.some((ref, index) => currentRefs[index] !== ref))
       throw new Error("Native ownership tree changed during service observation");
-    // Offline/unsupervised live rows are not authoritative; terminal rows still
-    // need their exact durable completion, which an offline downgrade cannot supply.
-    const servicesUnknown = services.some(unit => !unit.supervised && !terminalService(unit.state));
-    const liveServices = services.some(unit => !terminalService(unit.state));
-    const deliveriesPending = (session: InstanceType<typeof pi.pi.AgentSession>) => {
+    const deliveriesPending = (session: NativeSession) => {
       const delivery = session.getAsyncJobSnapshot({ recentLimit: 0 })?.delivery;
       return !!delivery && (delivery.delivering || delivery.queued > 0 || delivery.pendingJobIds.length > 0);
     };
@@ -218,57 +248,78 @@ export default function hostExtension(pi: ExtensionAPI): void {
       && (registry.isRunning(ref) || ref.session instanceof pi.pi.AgentSession
         && (pendingNativeWake(ref.session) || ref.session.hasAdmittedSubmission || ref.session.hasPostPromptWork
           || ref.session.isBusyForSnapshot || ref.session.yieldQueue.has() || deliveriesPending(ref.session))));
-    const tracking = journal.flatMap(entry => entry.type === "custom" && entry.customType === "superagent_service_tracking"
-      && (entry.data as Frame)?.rootSessionId === identity.id ? [(entry.data as Frame).known] : []);
-    const trackingKnown = tracking.length > 0 && tracking.every(known => known === true);
-    const generations = journal.flatMap(entry => entry.type === "custom" && entry.customType === "superagent_service_generation"
-      && (entry.data as Frame)?.rootSessionId === identity.id ? [entry.data as Frame] : []);
-    const serviceEntries = new Map<string, readonly unknown[]>();
-    for (const owner of new Set(services.map(unit => unit.owner!).concat(
-      generations.map(row => (row.daemon as Frame | undefined)?.owner).filter((owner): owner is string => typeof owner === "string")))) {
+    const serviceOwners = new Set<string>();
+    const liveGenerations = new Set<string>();
+    let servicesUnknown = false;
+    for (const unit of services) {
+      if (unit.owner) serviceOwners.add(unit.owner);
+      if (!terminalService(unit.state)) {
+        liveGenerations.add(serviceGenerationKey(unit));
+        // Offline/unsupervised live rows are not authoritative; terminal rows
+        // still need exact durable completion.
+        if (!unit.supervised) servicesUnknown = true;
+      }
+    }
+    for (const owner of trackedOwners) serviceOwners.add(owner);
+    const liveByOwner = new Map<string, NativeSession | undefined>();
+    if (serviceOwners.size > 0) {
+      for (const { session } of refs) {
+        if (!session) continue;
+        const id = session.sessionManager.getSessionId();
+        const live = session instanceof pi.pi.AgentSession ? session : undefined;
+        if (!liveByOwner.has(id)) liveByOwner.set(id, live);
+        const advisor = `${id}-advisor`;
+        if (!liveByOwner.has(advisor)) liveByOwner.set(advisor, live);
+      }
+    }
+    // Primary and advisor IDs can share a transcript. Reuse only within this
+    // observation, and do not reuse the earlier root tracking scan: native
+    // completions may have arrived while waiting on service observation.
+    const sources = new Map<NativeSession | string, {
+      readonly owners: string[]; readonly flush: Set<NativeSession>;
+    }>();
+    for (const owner of serviceOwners) {
       const file = ownerFiles.get(owner);
       if (!file) continue;
-      const live = refs.find(ref => {
-        const id = ref.session?.sessionManager.getSessionId();
-        return id !== undefined && (id === owner || `${id}-advisor` === owner);
-      })?.session;
-      if (!drain && live instanceof pi.pi.AgentSession) {
-        serviceEntries.set(owner, live.sessionManager.getEntries());
-        continue;
+      const live = liveByOwner.get(owner);
+      const source = !drain && live ? live : file;
+      let use = sources.get(source);
+      if (!use) {
+        use = { owners: [], flush: new Set() };
+        sources.set(source, use);
       }
-      if (drain && live instanceof pi.pi.AgentSession) {
+      use.owners.push(owner);
+      if (drain && live) use.flush.add(live);
+    }
+    const byOwner = new Map<string, ReturnType<typeof indexServiceCompletions>>();
+    for (const [source, use] of sources) {
+      for (const live of use.flush) {
         await live.waitForIdle();
         await live.sessionManager.ensureOnDisk();
         live.sessionManager.flushSync();
       }
-      serviceEntries.set(owner, parseSessionEntries(await fs.readFile(file, "utf8")));
+      const proof = indexServiceCompletions(typeof source === "string"
+        ? parseSessionEntries(await fs.readFile(source, "utf8")) : entries(source.sessionManager));
+      for (const owner of use.owners) byOwner.set(owner, proof);
     }
-    const recorded = (daemon: Frame) => serviceCompletionRecorded(daemon, serviceEntries.get(String(daemon.owner)) ?? []);
-    const tracked = generations.filter(row => row.daemon && typeof row.daemon === "object").map(row => row.daemon as Frame);
-    const knownKeys = new Set(tracked.map(generationKey));
-    const serviceDeliveryUnknown = !trackingKnown || knownKeys.size !== tracked.length
-      || generations.some(row => row.uncertain === true)
-      || generations.some(row => row.phase === "attempt" && !generations.some(result =>
-        result.phase === "result" && result.owner === row.owner && result.toolCallId === row.toolCallId))
-      || generations.some(row => Array.isArray(row.previous) && row.previous.some(value => {
+    let serviceDeliveryUnknown = !trackingSeen || journalUnknown
+      || attempts.some(row => !results.get(row.owner)?.has(row.toolCallId))
+      || previousGenerations.some(values => values.some(value => {
         const previous = value as Frame;
-        return owners.has(String(previous.owner)) && !knownKeys.has(generationKey(previous));
-      }))
-      || tracked.some(daemon => {
-        if (services.some(unit => generationKey(unit) === generationKey(daemon) && !terminalService(unit.state))) return false;
-        const entries = serviceEntries.get(String(daemon.owner)) ?? [];
-        // A recorded terminal completion supplies the final snapshot even when
-        // the broker now exposes a replacement generation under the same name.
-        return !entries.some(value => {
-          const entry = value as Frame;
-          const daemons = (entry.details as Frame | undefined)?.daemons;
-          return entry.type === "custom_message" && entry.customType === "launch-completion"
-            && Array.isArray(daemons) && daemons.some(value => generationKey(value as Frame) === generationKey(daemon)
-              && serviceCompletionRecorded(value as Frame, entries));
-        });
-      })
-      || services.some(unit => !knownKeys.has(generationKey(unit))
-        || terminalService(unit.state) && !recorded({ ...unit }));
+        return owners.has(String(previous.owner)) && !tracked.has(serviceGenerationKey(previous));
+      }));
+    if (!serviceDeliveryUnknown) {
+      // A recorded terminal completion supplies the final snapshot even when
+      // the broker now exposes a replacement generation under the same name.
+      for (const [key, daemon] of tracked) {
+        if (!liveGenerations.has(key) && !byOwner.get(String(daemon.owner))?.hasGeneration(key)) {
+          serviceDeliveryUnknown = true;
+          break;
+        }
+      }
+    }
+    serviceDeliveryUnknown ||= services.some(unit => !tracked.has(serviceGenerationKey(unit))
+      || terminalService(unit.state) && !byOwner.get(String(unit.owner))?.hasCompletion(unit));
     if (drain) {
       const refreshed = await scopedServices();
       if (!isDeepStrictEqual(services, refreshed))
@@ -279,7 +330,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
       throw new Error("Native descendant identity changed during completion readback");
     const tree = identity.session.getAsyncJobTree({ recentLimit: 0 });
     return { identity, tree, unknown: servicesUnknown || serviceDeliveryUnknown || descendantsUnknown(),
-      busy: liveServices || descendantsBusy() || deliveriesPending(identity.session) || !!tree?.running.length };
+      busy: liveGenerations.size > 0 || descendantsBusy() || deliveriesPending(identity.session) || !!tree?.running.length };
   };
   const localIdle = () => {
     const { session } = exact();
