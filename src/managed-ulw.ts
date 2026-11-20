@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -126,7 +126,6 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
 async function initialize(root: string): Promise<void> {
   try {
     await mkdir(root, { mode: 0o700 });
-    await writeFile(join(root, "owner.json"), JSON.stringify({ owner: ownership }), { flag: "wx", mode: 0o600 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     // Concurrent initialization may have created the directory just before its
@@ -136,6 +135,17 @@ async function initialize(root: string): Promise<void> {
       catch (cause) { if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause; }
       await Bun.sleep(10);
     }
+    assertOwned(root);
+    return;
+  }
+  // A second installer may already be reading owner.json. Publish complete bytes
+  // without replacing an existing marker or claiming a directory we didn't create.
+  const marker = join(root, `.owner-${crypto.randomUUID()}.tmp`);
+  try {
+    await writeFile(marker, JSON.stringify({ owner: ownership }), { flag: "wx", mode: 0o600 });
+    await link(marker, join(root, "owner.json"));
+  } finally {
+    await rm(marker, { force: true });
   }
   assertOwned(root);
 }
