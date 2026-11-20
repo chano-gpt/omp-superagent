@@ -30,8 +30,8 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
-    # Ubuntu runs an additional native lifecycle suite.
-    timeout-minutes: ${{ matrix.os == 'ubuntu-24.04' && 45 || 30 }}
+    # Each runner builds the Rust binaries and exercises multiple stock OMP releases.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
