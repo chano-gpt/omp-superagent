@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import {
-  ChannelType, MessageFlags, MessageReferenceType, MessageType,
-  type Message, type MessageCreateOptions, type MessageReference, type TextChannel,
+  ChannelType, MessageFlags, MessageReferenceType, MessageType, REST, Routes,
+  type Message, type MessageReference, type TextChannel,
 } from "discord.js";
 import { VoiceDrafts } from "../src/discord-voice-draft.ts";
 
@@ -43,28 +43,40 @@ function reply(patch: Partial<ReplyFixture> = {}): Message {
   return fields as unknown as Message;
 }
 
-function fixture(delivery?: Promise<void>, receiptChannelId = channelId) {
-  const sent: Array<MessageCreateOptions & { id: string }> = [];
+function draftsFor(rest: Pick<REST, "post">) {
   const channel = {
-    id: channelId, guildId, type: ChannelType.GuildText, client: { user: { id: botId } },
-    async send(payload: MessageCreateOptions) {
-      const id = String(Number(cardId) + sent.length);
-      sent.push({ ...payload, id });
-      await delivery;
-      return {
-        id, author: { id: botId, bot: true },
-        channelId: receiptChannelId, guildId, content: payload.content, createdTimestamp: postedAt,
-      };
-    },
+    id: channelId, guildId, type: ChannelType.GuildText, client: { user: { id: botId }, rest },
   } as unknown as TextChannel;
   const drafts = new VoiceDrafts();
   const session = new AbortController();
-  const propose = (text = work) => drafts.propose(channel, ownerId, text, session.signal);
-  return { drafts, sent, session, propose };
+  const propose = (text = work, postDeadline?: number) => drafts.propose(channel, ownerId, text, { signal: session.signal, postDeadline });
+  return { drafts, session, propose };
 }
 
-test("uses the sent card identity and turns the owner's written reply into ordinary one-shot work", async () => {
-  const { drafts, propose } = fixture();
+function fixture(delivery?: Promise<void>, receiptPatch: Readonly<Record<string, unknown>> = {}) {
+  const sent: Array<{ id: string; content: string; signal?: AbortSignal }> = [];
+  const context = draftsFor({
+    async post(route, options) {
+      const body = options?.body;
+      if (route !== Routes.channelMessages(channelId) || !body || typeof body !== "object" ||
+        !("content" in body) || typeof body.content !== "string") throw new Error("Invalid draft request");
+      const id = String(Number(cardId) + sent.length);
+      sent.push({ ...body, id, content: body.content, signal: options?.signal });
+      await delivery;
+      return {
+        id, author: { id: botId, bot: true }, channel_id: channelId,
+        content: body.content, timestamp: new Date(postedAt).toISOString(), ...receiptPatch,
+      };
+    },
+  });
+  return { ...context, sent };
+}
+
+test.each([
+  ["omitted guild", {}],
+  ["matching guild and fractional offset timestamp", { guild_id: guildId, timestamp: "1970-01-01T00:00:01.000000+00:00" }],
+] as const)("uses the sent card identity for one-shot written confirmation (%s)", async (_receipt, receiptPatch) => {
+  const { drafts, propose } = fixture(undefined, receiptPatch);
   await propose();
 
   const input = drafts.consume(reply());
@@ -100,15 +112,13 @@ const invalidReplies: readonly (readonly [string, Partial<ReplyFixture>])[] = [
   ["sticker", { stickers: new Set(["800"]) }],
 ];
 
-for (const [violation, patch] of invalidReplies) {
-  test(`does not consume a draft on ${violation}`, async () => {
-    const { drafts, propose } = fixture();
-    await propose();
+test.each(invalidReplies)("does not consume a draft on %s", async (_violation, patch) => {
+  const { drafts, propose } = fixture();
+  await propose();
 
-    expect(drafts.consume(reply(patch))).toBeNull();
-    expect(drafts.consume(reply())).not.toBeNull();
-  });
-}
+  expect(drafts.consume(reply(patch))).toBeNull();
+  expect(drafts.consume(reply())).not.toBeNull();
+});
 
 test("rejects a replay of the old confirmation even after a new card is posted", async () => {
   const { drafts, propose, sent } = fixture();
@@ -150,11 +160,25 @@ test("does not retry or infer a card ID after an ambiguous Discord send", async 
   expect(drafts.consume(reply())).toBeNull();
 });
 
-test("does not bind a Discord receipt from outside the original channel", async () => {
-  const { drafts, propose } = fixture(undefined, "501");
+test.each([
+  ["another channel", { channel_id: "501" }],
+  ["another guild", { guild_id: "401" }],
+  ["a null guild", { guild_id: null }],
+  ["another bot", { author: { id: "201", bot: true } }],
+  ["a non-bot author", { author: { id: botId, bot: false } }],
+  ["a missing author", { author: null }],
+  ["a non-snowflake ID", { id: "not-a-message-id" }],
+  ["an out-of-range snowflake", { id: "18446744073709551616" }],
+  ["a non-ISO timestamp", { timestamp: "0" }],
+  ["an invalid ISO timestamp", { timestamp: "2025-13-01T00:00:00Z" }],
+  ["altered content", { content: "Not the submitted card" }],
+] as const)("does not bind a Discord receipt with %s", async (_violation, receiptPatch) => {
+  const { drafts, propose, sent } = fixture(undefined, receiptPatch);
 
-  await expect(propose()).rejects.toThrow("did not verify");
+  await expect(propose()).rejects.toMatchObject({ certainty: "uncertain" });
   expect(drafts.consume(reply())).toBeNull();
+  await expect(propose()).rejects.toThrow("already outstanding");
+  expect(sent).toHaveLength(1);
 });
 
 test("a card cannot be confirmed at its expiry even though the session remains active", async () => {
@@ -194,13 +218,72 @@ test("clearing a session while Discord is sending cannot activate its late card"
   expect(drafts.consume(reply())).toBeNull();
 });
 
+test.each(["clear", "session abort", "posting deadline"] as const)("%s cancels a draft queued behind an in-flight Discord REST request", async cancel => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const transmitted: unknown[] = [];
+  const rest = new REST({
+    retries: 0, rejectOnRateLimit: () => true,
+    async makeRequest(_url, options) {
+      transmitted.push(options.body);
+      if (transmitted.length === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return new Response(null, { status: 204 });
+    },
+  }).setToken("fixture-token");
+  const route = Routes.channelMessages(channelId);
+  const { drafts, propose, session } = draftsFor(rest);
+  const blocker = { content: "Block this route's first request" };
+  const probe = { content: "Next request after the canceled draft" };
+  const inFlight = rest.post(route, { body: blocker });
+  let proposal: Promise<void> | undefined;
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(() => deadline.reject(new Error("Queued draft did not cancel before transport release")), 1000);
+  try {
+    await Promise.race([entered.promise, deadline.promise]);
+    proposal = propose(work, cancel === "posting deadline" ? performance.now() + 100 : undefined);
+    const outcome = Promise.race([proposal, deadline.promise]).catch((error: unknown) => error);
+    // Let the SDK's async request preparation enqueue behind the blocked wire call.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (cancel === "clear") drafts.clear();
+    if (cancel === "session abort") session.abort();
+    expect(await outcome).toMatchObject({ certainty: "uncertain" });
+    expect(drafts.consume(reply())).toBeNull();
+    expect(transmitted).toEqual([JSON.stringify(blocker)]);
+    release.resolve();
+    await inFlight;
+    await rest.post(route, { body: probe });
+    expect(transmitted).toEqual([JSON.stringify(blocker), JSON.stringify(probe)]);
+  } finally {
+    clearTimeout(timer);
+    release.resolve();
+    await Promise.allSettled([inFlight, proposal]);
+    rest.clearHashSweeper();
+    rest.clearHandlerSweeper();
+  }
+});
+
+test("a verified card can still be confirmed after its posting deadline", async () => {
+  const { drafts, propose, sent } = fixture();
+  await propose(work, performance.now() + 100);
+  const signal = sent[0]?.signal;
+  if (!signal) throw new Error("Discord did not receive a posting deadline signal");
+  if (!signal.aborted) await new Promise<void>(resolve => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+
+  expect(drafts.consume(reply())).toContain(work);
+});
+
 test("renders proposal content literally and disables Discord mentions and embeds", async () => {
   const { drafts, sent, propose } = fixture();
   const injection = "```\n@everyone <@300> <#500> [fake control](https://example.test)\n\u202E\u{E0061}\u{E0100}";
 
   await propose(injection);
 
-  expect(sent[0]).toMatchObject({ allowedMentions: { parse: [], repliedUser: false }, flags: MessageFlags.SuppressEmbeds });
+  expect(sent[0]).toMatchObject({ allowed_mentions: { parse: [], replied_user: false }, flags: MessageFlags.SuppressEmbeds });
   const content = sent[0]?.content;
   expect(content?.match(/^```$/gm)).toHaveLength(2);
   expect(content).not.toContain("\u202E");

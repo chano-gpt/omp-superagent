@@ -7,7 +7,7 @@ import { openCodexLive } from "../src/codex-live";
 const speech = Buffer.alloc(960).fill(Buffer.from([0x10, 0x10]));
 const posted = Buffer.from([1, 0]);
 const withheld = Buffer.from([2, 0]);
-const notified = Buffer.from([3, 0]);
+const dictated = 'src/GPUPath.ts에서 dispatch("keep_case")를 확인해 줘.\n테스트는 2개만 추가하고 설정은 바꾸지 마.';
 const key = "OMP_SA_CODEX_VOICE_PYTHON";
 
 test("a relative Codex profile is rejected instead of opening the default subscriber's login", async () => {
@@ -36,29 +36,27 @@ if (voice === "breeze") {
   process.exit(1);
 }
 send({ type: "ready" });
+if (voice === "ember") send({ type: "draft", id: "no_speech", text: "Not a spoken request" });
 const reader = require("node:readline").createInterface({ input: process.stdin });
 let firstInput = true;
 for await (const line of reader) {
   const event = JSON.parse(line);
   if (event.type === "stop") break;
   if (event.type === "input") {
+    if (voice === "arbor") {
+      send({ type: "audio", audio: "AQ==" });
+      continue;
+    }
     send({ type: "audio", audio: event.audio });
-    if (firstInput && voice !== "ember") {
+    if (firstInput && voice === "cove") {
       firstInput = false;
-      const draft = { type: "draft", id: "owner_1", text: "초안을 작성해 주세요" };
+      const draft = { type: "draft", id: "owner_1", text: ${JSON.stringify(dictated)} };
       send(draft);
       send(draft);
       send({ type: "draft", id: "same_audio", text: "Do not propose twice for one utterance" });
     }
   }
   if (event.type === "draft_result") pcm([event.posted ? 1 : 2, 0]);
-  if (event.type === "notify") {
-    if (voice === "arbor") send({ type: "audio", audio: "AQ==" });
-    else {
-      pcm([3, 0]);
-      send({ type: "draft", id: "no_speech", text: "Not a new spoken request" });
-    }
-  }
 }
 `;
 
@@ -87,7 +85,7 @@ async function withFixture(run: (signal: AbortSignal) => Promise<void>): Promise
   }
 }
 
-test("Codex voice relays PCM and posts one draft per voiced utterance using its isolated bridge", async () => {
+test("Codex voice relays PCM and posts one unchanged draft per voiced utterance", async () => {
   await withFixture(async signal => {
     const draftReceipt = Promise.withResolvers<void>();
     const proposed: string[] = [];
@@ -108,21 +106,19 @@ test("Codex voice relays PCM and posts one draft per voiced utterance using its 
     session.close();
 
     expect({ proposed, interrupts, speech: audio[0], receipts: audio.slice(1).sort(Buffer.compare) }).toEqual({
-      proposed: ["초안을 작성해 주세요"], interrupts: 1, speech, receipts: [posted, withheld],
+      proposed: [dictated], interrupts: 1, speech, receipts: [posted, withheld],
     });
   });
 });
 
-test("a bridge draft following a reply notice cannot reuse prior owner speech", async () => {
+test("a bridge draft without owner speech is withheld", async () => {
   await withFixture(async signal => {
-    const inputReachedBridge = Promise.withResolvers<void>();
     const rejected = Promise.withResolvers<void>();
     const audio: Buffer[] = [];
     const drafts: string[] = [];
-    const session = await openCodexLive({ voice: "ember" }, {
+    await openCodexLive({ voice: "ember" }, {
       audio(pcm) {
         audio.push(pcm);
-        if (pcm.equals(speech)) inputReachedBridge.resolve();
         if (pcm.equals(withheld)) rejected.resolve();
       },
       interrupt() {},
@@ -130,12 +126,9 @@ test("a bridge draft following a reply notice cannot reuse prior owner speech", 
       async forward(text) { drafts.push(text); return "not expected"; },
     }, signal);
 
-    session.input(speech);
-    await inputReachedBridge.promise;
-    session.notifyHeadReply();
     await rejected.promise;
 
-    expect({ audio, drafts }).toEqual({ audio: [speech, notified, withheld], drafts: [] });
+    expect({ audio, drafts }).toEqual({ audio: [withheld], drafts: [] });
   });
 });
 
@@ -162,7 +155,7 @@ test("invalid PCM from a ready bridge terminates voice without emitting audio", 
       async forward() { return "not expected"; },
     }, signal);
 
-    session.notifyHeadReply();
+    session.input(speech);
     await ended.promise;
 
     expect(audio).toEqual([]);

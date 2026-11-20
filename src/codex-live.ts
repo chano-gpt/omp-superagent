@@ -21,7 +21,6 @@ type LiveSession = Awaited<ReturnType<typeof openLive>>;
 type BridgeCommand =
   | { readonly type: "input"; readonly audio: string }
   | { readonly type: "draft_result"; readonly id: string; readonly posted: boolean }
-  | { readonly type: "notify" }
   | { readonly type: "stop" };
 
 class CodexLiveError extends Error {
@@ -139,14 +138,6 @@ export async function openCodexLive(
         lastSpeech = now;
       }
       if (phase === "active") send({ type: "input", audio: pcm.toString("base64") });
-    },
-    notifyHeadReply() {
-      if (phase === "active") {
-        // A notification is never itself a new owner request. Do not reuse speech
-        // from before the notification if it prompts the model to delegate.
-        draftedUtterance = utterance;
-        send({ type: "notify" });
-      }
     },
     close: abort,
   };

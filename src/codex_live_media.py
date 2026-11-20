@@ -16,14 +16,13 @@ from aiortc.mediastreams import MediaStreamError
 from anyio.abc import ObjectReceiveStream
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
 
-from codex_live_provider import DRAFT_ID, BridgeError, SpeechSink, append_speech, delegation_event
+from codex_live_provider import DRAFT_ID, BridgeError, SpeechSink, append_draft_result, delegation_event
 
 PCM_HZ: Final = 24_000
 FRAME_SAMPLES: Final = 480
 FRAME_BYTES: Final = FRAME_SAMPLES * 2
 MAX_PCM: Final = 24_000
 MAX_DRAFTS: Final = 32
-REPLY_NOTICE: Final = "A reply from HEAD is available in the Discord text channel."
 POSTED: Final = "A draft was posted for written confirmation. Nothing was submitted or executed."
 NOT_POSTED: Final = "The client did not confirm posting a draft. Do not retry; check the text channel. Nothing was submitted or executed."
 NO_TEXT: Final = "No clear draft text was provided. If the owner explicitly requested a draft, ask them to restate it."
@@ -42,12 +41,7 @@ class DraftResult(BaseModel):
     posted: bool
 
 
-class Notify(BaseModel):
-    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
-    type: Literal["notify"]
-
-
-type Command = Input | DraftResult | Notify
+type Command = Input | DraftResult
 COMMANDS: Final = TypeAdapter(Command)
 
 
@@ -175,7 +169,7 @@ async def run_peer(
                     seen.add(identifier)
                     if (not active.is_set() or not text or len(text.encode("utf-16-le")) > 2_000
                             or any(secret.get_secret_value() in text for secret in secrets)):
-                        await append_speech(sideband, NO_TEXT, identifier)
+                        await append_draft_result(sideband, NO_TEXT, identifier)
                         continue
                     pending.add(identifier)
                     emit({"type": "draft", "id": identifier, "text": text})
@@ -206,9 +200,7 @@ async def run_peer(
                         if identifier not in pending:
                             raise BridgeError("Uncorrelated voice draft result.")
                         pending.remove(identifier)
-                        await append_speech(sideband, POSTED if posted else NOT_POSTED, identifier)
-                    case Notify():
-                        await append_speech(sideband, REPLY_NOTICE)
+                        await append_draft_result(sideband, POSTED if posted else NOT_POSTED, identifier)
                     case _ as unreachable:
                         assert_never(unreachable)
             tasks.cancel_scope.cancel()

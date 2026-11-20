@@ -114,7 +114,7 @@ function inbound(channel: Channel, patch: Record<string, unknown> = {}): Message
   return {
     id: "100", author: { id: owner, bot: false }, channel, channelId: channel.id, guildId: channel.guildId,
     type: 0, content: "hello", attachments: new Collection(), editedTimestamp: null, createdTimestamp: 1000, webhookId: null,
-    partial: false, ...patch,
+    partial: false, stickers: new Collection(), messageSnapshots: new Collection(), ...patch,
   } as unknown as Message;
 }
 
@@ -236,6 +236,43 @@ describe("Discord routing and parsing", () => {
       await drain();
       expect(channel.sent).toHaveLength(2);
     } finally { await messenger.stop(); }
+  });
+  test.each(["/voice work off", "/voice start work", "/voice start share"])("owner %s uses the call at receipt, even while a reply lookup is stalled", async text => {
+    const { messenger, gateway, channel, received } = await fixture({ voice: {
+      apiKeyEnv: "SUPERAGENT_TEST_ABSENT_VOICE_KEY", channelId: "401", textChannelId: "parent",
+      model: "speech", backendModel: "delegate", voice: "selected", maxSessionSeconds: 60,
+    } });
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const fetchReply = channel.messages.fetch;
+    channel.messages.fetch = async query => {
+      started.resolve();
+      await release.promise;
+      return fetchReply(query);
+    };
+    try {
+      gateway.emit(Events.MessageCreate, inbound(channel, { id: "101", type: 19,
+        reference: { messageId: "100", guildId: channel.guildId, channelId: channel.id } }));
+      await started.promise;
+      if (text === "/voice work off") {
+        gateway.emit(Events.MessageCreate, inbound(channel, { id: "102", content: "/voice start", createdTimestamp: Date.now() }));
+      }
+      const control = inbound(channel, { id: "103", content: text, createdTimestamp: Date.now() });
+      gateway.emit(Events.MessageCreate, { ...control, author: { id: "not-the-owner", bot: false } });
+      expect(channel.sent).toHaveLength(0);
+
+      gateway.emit(Events.MessageCreate, control);
+
+      expect(channel.sent).toHaveLength(1);
+      expect(received).toEqual([]);
+      release.resolve();
+      await drain();
+      expect(received.map(input => input.id)).toEqual([`discord:${bot}:101:original`]);
+      if (text === "/voice work off") expect(channel.sent[1]?.content).toContain("No Live session was opened");
+    } finally {
+      release.resolve();
+      await messenger.stop();
+    }
   });
   test("an ordinary reply to a voice draft never includes the unconfirmed task, even from history", async () => {
     const { messenger, gateway, channel, received } = await fixture();

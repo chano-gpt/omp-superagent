@@ -1,6 +1,5 @@
 import { ChannelType, MessageType, type Message, type TextChannel } from "discord.js";
 import type { DiscordVoiceConfig } from "./config";
-import { routeKey, type Inbound, type OutputRecord } from "./contracts";
 import { VoiceDrafts } from "./discord-voice-draft";
 import type { openVoiceLink } from "./discord-voice-link";
 import type { openLive } from "./openai-live";
@@ -14,14 +13,17 @@ const connectProvider: typeof openLive = async (...args) =>
 const connectSubscription: typeof openCodexLive = async (...args) =>
   (await import("./codex-live")).openCodexLive(...args);
 
+type DraftPermission = "off" | "call" | "one";
+
 /** One explicitly started session on the existing Gateway client. No background rejoin or paid retries. */
 export class DiscordVoice {
   private session?: AbortController;
-  private drafts = new VoiceDrafts();
-  private readonly awaitingText = new Map<string, string>();
-  private notifyReply?: () => void;
+  private readonly drafts = new VoiceDrafts();
+  private ready = false;
+  private permission: DraftPermission = "off";
   private shareUntil = 0;
   private lastCommand = 0n;
+  private lastWorkOff = 0n;
   private readonly startedAt = Date.now();
 
   constructor(private readonly config: DiscordVoiceConfig, private readonly owner: string,
@@ -29,46 +31,54 @@ export class DiscordVoice {
     private readonly live = connectProvider, private readonly subscription = connectSubscription) {}
 
   static isControl(text: string): boolean { return /^\/voice(?:\s|$)/i.test(text.trim()); }
+  static isPriorityControl(text: string): boolean { return /^\/voice (?:stop|work off|start (?:work|share))$/.test(text.trim()); }
 
   /** Only called for authorized, original MessageCreate events, never catchup or edits. */
-  command(message: Message, input: Inbound): string | null {
+  command(message: Message): string | null {
     if (message.author.bot || message.author.id !== this.owner || message.webhookId || message.editedTimestamp !== null ||
       (message.type !== MessageType.Default && message.type !== MessageType.Reply) || message.channel.type !== ChannelType.GuildText ||
       message.channelId !== this.config.textChannelId || message.createdTimestamp < this.startedAt ||
       !/^\d{1,20}$/.test(message.id)) return null;
-    const sequence = BigInt(message.id);
-    if (sequence <= this.lastCommand) return null;
-    this.lastCommand = sequence;
-    const channel = message.channel;
     const control = message.content.trim();
+    if (control !== "/voice confirm" && (message.type !== MessageType.Default || message.reference ||
+      message.attachments.size || message.stickers.size || message.messageSnapshots.size)) return null;
+    const sequence = BigInt(message.id);
+    // Work-off revokes earlier permissions and confirmations, but must not
+    // discard an ordinary conversation start still queued behind text intake.
+    if (sequence <= this.lastCommand || (control !== "/voice start" && sequence <= this.lastWorkOff)) return null;
+    if (control === "/voice work off") this.lastWorkOff = sequence;
+    else this.lastCommand = sequence;
+    const channel = message.channel;
     if (control === "/voice confirm") {
       const work = this.drafts.consume(message);
-      if (work) this.awaitingText.set(input.id, routeKey(input.route));
       if (!work) this.notice(channel, "No matching active voice draft. Reply to the current draft, or write the request directly.");
       return work;
     }
-    if (message.type !== MessageType.Default || message.reference || message.attachments.size) return null;
     if (control === "/voice stop") {
       this.close();
       this.notice(channel, "Voice is off.");
-    } else if (control === "/voice share" && this.config.auth === "subscription") {
-      if (!this.session || !this.notifyReply) this.notice(channel, "Start subscription voice before sharing a work draft.");
-      else {
-        this.shareUntil = performance.now() + 60_000;
-        this.notice(channel, "For one minute, the next voice work draft may be posted here. Speak the task now. Posting is not approval.");
-      }
-    } else if (control === "/voice start") {
+    } else if (control === "/voice work off") {
+      this.revokeWork();
+      this.notice(channel, "Voice work drafts are off. Unconfirmed drafts can no longer be submitted.");
+    } else if (control === "/voice start" || control === "/voice start work" ||
+      (control === "/voice start share" && this.config.auth === "subscription")) {
       if (this.session) this.notice(channel, "A voice session is already starting or active.");
-      else void this.start(channel).catch(() => this.report(new Error("Discord voice startup failed")));
+      else {
+        const permission = control === "/voice start work" ? "call" : control === "/voice start share" ? "one" : "off";
+        void this.start(channel, permission).catch(() => this.report(new Error("Discord voice startup failed")));
+      }
     } else this.notice(channel, this.config.auth === "subscription"
-      ? "Use /voice start or /voice stop. Use /voice share before dictating one work draft for this channel."
-      : "Use /voice start or /voice stop. Voice uses paid OpenAI Live audio.");
+      ? "Use /voice start for conversation, /voice start work for work drafts, or /voice start share for one draft. Use /voice work off or /voice stop to revoke."
+      : "Use /voice start for conversation or /voice start work for work drafts. Use /voice work off or /voice stop to revoke. Voice uses paid OpenAI Live audio.");
     return null;
   }
 
-  private async start(text: TextChannel): Promise<void> {
+  private async start(text: TextChannel, permission: DraftPermission): Promise<void> {
     const session = new AbortController();
     this.session = session;
+    // A mode is selected before this provider receives any audio. It can only
+    // be revoked, not granted to audio or a delegation from an existing call.
+    this.permission = permission;
     const { signal } = session;
     const finish = (reason: string) => {
       if (this.session !== session) return;
@@ -106,19 +116,24 @@ export class DiscordVoice {
         interrupt: () => activeLink.clear(), ended,
         forward: async request => {
           signal.throwIfAborted();
-          if (config.auth === "subscription") {
-            if (!this.shareUntil || performance.now() >= this.shareUntil) throw new Error("No written permission to share a voice draft");
-            this.shareUntil = 0;
+          const postDeadline = this.permission === "one" ? this.shareUntil : undefined;
+          if (!this.ready || (this.permission !== "call" && (postDeadline === undefined || performance.now() >= postDeadline))) {
+            throw new Error("No written permission to share a voice draft");
           }
-          await this.drafts.propose(text, this.owner, request, signal);
+          if (this.permission === "one") this.permission = "off";
+          await this.drafts.propose(text, this.owner, request, { signal, postDeadline });
           return "Draft posted for written confirmation. Not yet submitted to HEAD or executed.";
         },
       });
       if (signal.aborted) { provider.close(); return; }
-      this.notifyReply = () => provider?.notifyHeadReply();
-      this.notice(text, config.auth === "subscription"
-        ? "Voice ready. Audio goes to OpenAI using your Codex subscription. To post one work draft here, type /voice share before dictating it. Use /voice stop to disconnect."
-        : "Voice ready. Your audio goes to OpenAI Live. Use /voice stop to disconnect.");
+      if (this.permission === "one") this.shareUntil = performance.now() + 60_000;
+      this.ready = true;
+      const providerName = config.auth === "subscription" ? "OpenAI via your Codex subscription" : "OpenAI Live";
+      const drafts = this.permission === "call"
+        ? "Explicit work requests can be posted here as drafts for this call."
+        : this.permission === "one" ? "One work draft can be posted here in the next minute."
+          : "Draft posting is off. To enable it, stop this call and use /voice start work.";
+      this.notice(text, `Voice ready. Audio goes to ${providerName}. ${drafts} Use /voice stop to disconnect.`);
     } catch {
       // Never send SDK errors, bearer headers, owner audio, or transcripts to Discord/logs.
       finish(this.config.auth === "subscription"
@@ -131,20 +146,17 @@ export class DiscordVoice {
     void channel.send({ content, allowedMentions: { parse: [] } }).catch(() => this.report(new Error("Discord voice notice delivery failed")));
   }
 
-  textDelivered(output: OutputRecord): void {
-    if (this.awaitingText.get(output.sourceId) !== routeKey(output.route)) return;
-    this.awaitingText.delete(output.sourceId);
-    // Discord delivery succeeded; a best-effort spoken notice cannot change that outcome.
-    try { this.notifyReply?.(); } catch { this.report(new Error("Voice reply notification failed")); }
+  private revokeWork(): void {
+    this.permission = "off";
+    this.shareUntil = 0;
+    this.drafts.clear();
   }
 
   close(): void {
     const session = this.session;
     this.session = undefined;
-    this.notifyReply = undefined;
-    this.shareUntil = 0;
-    this.awaitingText.clear();
+    this.ready = false;
+    this.revokeWork();
     session?.abort();
-    this.drafts.clear();
   }
 }

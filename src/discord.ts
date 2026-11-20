@@ -129,13 +129,12 @@ export class DiscordMessenger implements Messenger {
     this.voice?.close();
   };
   private readonly onMessage = (message: Message) => {
-    // Revocation must not wait behind a slow reply fetch or HEAD intake. command()
-    // checks origin/identity and fences older queued starts by real snowflake.
+    // Revocation and work-mode starts must use the call state at event receipt,
+    // not after stalled intake. The owner command fences older queued starts.
     if (this.voice && this.voiceConnected && this.admission?.resolvedReady && !this.admission.stopped &&
-      !message.partial && message.content === "/voice stop" && message.channelId === this.options.voice?.textChannelId &&
+      !message.partial && DiscordVoice.isPriorityControl(message.content) && message.channelId === this.options.voice?.textChannelId &&
       this.route(message.channel)?.guildId) {
-      const input = this.normalize(message);
-      if (input) this.voice.command(message, input);
+      this.voice.command(message);
       return;
     }
     this.enqueue(message, true);
@@ -235,7 +234,7 @@ export class DiscordMessenger implements Messenger {
       if (inbound) {
         if (this.isVoiceControl(inbound)) {
           if (!fresh || message.partial || voiceEpoch !== this.voiceEpoch || !this.voiceConnected) return;
-          const work = this.voice?.command(full, inbound);
+          const work = this.voice?.command(full);
           if (work) await this.handlers?.message({ ...inbound, text: work, attachments: [], reply: undefined });
           return;
         }
@@ -442,7 +441,6 @@ export class DiscordMessenger implements Messenger {
         // without a reference: an ambiguous first attempt may already exist.
         ...(output.replyTo ? { reply: { messageReference: output.replyTo.messageId, failIfNotExists: false } } : {}),
       });
-      this.voice?.textDelivered(output);
       return message.id;
     } catch (error) { throw deliveryError(error); }
   }

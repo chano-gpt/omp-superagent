@@ -38,7 +38,7 @@ from pydantic import SecretStr, ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from codex_live_auth import CodexLogin, CodexLoginError, read_codex_login
-from codex_live_media import BridgeEvent, Command, DraftResult, Input, Notify, PcmInputTrack, Sideband, run_peer
+from codex_live_media import BridgeEvent, Command, DraftResult, Input, PcmInputTrack, Sideband, run_peer
 from codex_live_provider import BridgeError, connect_subscription
 
 
@@ -228,24 +228,31 @@ async def verify_media() -> None:
                 await inbound_send.send(json.dumps({"type": "session.delegation.created", "delegation": {
                     "type": "delegation", "target": "client", "id": "draft_1",
                 }}))
-                for identifier, text in (("reflected", "do-not-leak"), ("draft_1", "Prepare the proposal.")):
+                dictated = [
+                    'src/GPUPath.ts에서 dispatch("keep_case")를 확인해 줘.\n',
+                    "테스트는 2개만 추가하고 설정은 바꾸지 마.",
+                ]
+                for identifier, chunks in (
+                    ("reflected", ["do-not-leak"]),
+                    ("oversize", ["a" * 500, "b" * 501]),
+                    ("draft_1", dictated),
+                ):
                     await inbound_send.send(json.dumps({"type": "delegation.created", "item": {
                         "type": "delegation", "target": "client", "id": identifier,
-                        "content": [{"type": "input_text", "text": text}],
+                        "content": [{"type": "input_text", "text": text} for text in chunks],
                     }}))
                 failure = json.loads(await outbound_read.receive())
                 assert failure["delegation_item_id"] == "reflected"
                 assert "do-not-leak" not in str(failure)
+                oversize = json.loads(await outbound_read.receive())
+                assert oversize["delegation_item_id"] == "oversize"
                 await draft_received.wait()
 
-                # A notify receipt marks the command path; the draft is never submitted as speech.
-                await commands_send.send(Notify(type="notify"))
-                notice = json.loads(await outbound_read.receive())
-                assert notice["type"] == "session.context.append" and notice["channel"] == "speakable"
-                assert drafts == [("draft_1", "Prepare the proposal.")]
+                assert drafts == [("draft_1", "".join(dictated))]
                 await commands_send.send(DraftResult(type="draft_result", id="draft_1", posted=True))
                 result = json.loads(await outbound_read.receive())
                 assert result["type"] == "delegation.context.append" and result["delegation_item_id"] == "draft_1"
+                assert result["channel"] == "speakable"
                 assert "written confirmation" in result["content"][0]["text"]
                 await commands_send.aclose()
     finally:

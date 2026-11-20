@@ -213,12 +213,19 @@ exclude other participants. Edits, catch-up and restart cannot open or resume it
 Subscription mode uses the local [Codex bridge](../../src/codex-live.ts) and
 WebRTC; API mode uses the separately billed [Live API](../../src/openai-live.ts).
 Subscription rejection or connection loss never falls back to API billing or
-retries automatically. The voice model cannot run shells, control lanes, or
-approve work. In subscription mode a written `/voice share` allows posting
-one draft to that channel within one minute, not starting work. In either mode
-only the owner's written `/voice confirm` as a reply to the active draft enters
-normal durable head intake; normal approval rules still apply. Matching head
-delivery may trigger a spoken notification, not exposure of the answer text to
-Live. The Gateway stores no audio recordings or full voice transcript; drafts
-are visible in Discord and confirmed tasks and replies use existing records.
+retries automatically. Live answers ordinary conversation. For explicit work
+requests it produces a text draft of the owner's speech, not a second task
+answer. Draft posting is off by default in both modes. `/voice start work`
+opens a new call with permission to post drafts to the bound text channel.
+Subscription mode also supports `/voice start share` for one draft within a
+minute after startup. Permission is fixed before audio reaches that provider
+session and cannot be added to an existing call. `/voice work off` revokes it,
+cancels still-queued posts and invalidates unconfirmed drafts without waiting for
+ordinary intake; requests already transmitted cannot be recalled. Neither start
+command submits or approves work. Only the owner's written
+`/voice confirm` as a reply to the active draft enters normal durable head
+intake; normal approval rules still apply. Head replies stay in normal Discord
+text delivery, with no return path to Live. The Gateway stores no recordings
+or full voice transcript; drafts are visible in Discord and confirmed tasks and
+replies use existing records.
 See the [voice operations guide](../discord-voice.md) for setup, costs, and limits.

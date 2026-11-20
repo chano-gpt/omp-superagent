@@ -1,10 +1,25 @@
-import { ChannelType, MessageFlags, MessageReferenceType, MessageType, type Message, type TextChannel } from "discord.js";
+import { Type } from "@sinclair/typebox/type";
+import { Value } from "@sinclair/typebox/value";
+import {
+  ChannelType, MessageFlags, MessageReferenceType, MessageType, Routes,
+  type Message, type RESTPostAPIChannelMessageJSONBody, type TextChannel,
+} from "discord.js";
 import { DeliveryError } from "./delivery.ts";
 
 const CONFIRM = "/voice confirm";
 export const VOICE_DRAFT_HEADER = "Proposed work from the live voice session (not yet submitted).\n";
 const PROPOSAL_TTL_MS = 5 * 60 * 1000;
 const MESSAGE_LIMIT = 2000;
+const MAX_SNOWFLAKE = (1n << 64n) - 1n;
+
+const receiptSchema = Type.Object({
+  id: Type.String({ pattern: "^[1-9][0-9]{0,19}$" }),
+  author: Type.Object({ id: Type.String(), bot: Type.Literal(true) }),
+  channel_id: Type.String(),
+  guild_id: Type.Optional(Type.String()),
+  content: Type.String(),
+  timestamp: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$" }),
+});
 
 type PostedDraft = {
   readonly id: string;
@@ -17,9 +32,15 @@ type PostedDraft = {
 };
 
 type Draft = {
+  readonly controller: AbortController;
   readonly signal: AbortSignal;
   readonly startedAt: number;
   readonly posted?: PostedDraft;
+};
+
+type DraftLifetime = {
+  readonly signal: AbortSignal;
+  readonly postDeadline?: number;
 };
 
 export class VoiceDrafts {
@@ -27,7 +48,7 @@ export class VoiceDrafts {
   private sending = false;
 
   /** The caller supplies the session's already allowlisted, bound guild text channel. */
-  async propose(channel: TextChannel, ownerId: string, text: string, signal: AbortSignal): Promise<void> {
+  async propose(channel: TextChannel, ownerId: string, text: string, { signal, postDeadline }: DraftLifetime): Promise<void> {
     signal.throwIfAborted();
     if (this.sending || this.current()) {
       throw new DeliveryError("A voice work proposal is already outstanding.", "rejected");
@@ -51,35 +72,53 @@ export class VoiceDrafts {
       `\`\`\`\n${literal}\n\`\`\`\n` +
       `To submit this proposal to HEAD, reply to this message with exactly \`${CONFIRM}\` ` +
       "while the voice session is active and within five minutes.\n" +
-      "HEAD replies in Discord text. OpenAI Live does not receive the reply content. " +
+      "Check the transcribed request before confirming. HEAD replies only in Discord text. " +
       "Risky actions still require separate approval.";
     if (content.length > MESSAGE_LIMIT) {
       throw new DeliveryError("Voice work proposal is too long to review in one Discord message.", "rejected");
     }
 
-    const draft = { signal, startedAt: Date.now() };
+    const controller = new AbortController();
+    const draft = { controller, signal: AbortSignal.any([signal, controller.signal]), startedAt: Date.now() };
+    const remaining = postDeadline === undefined ? undefined : Math.ceil(postDeadline - performance.now());
+    if (remaining !== undefined && remaining <= 0) {
+      throw new DeliveryError("The one-draft posting permission expired.", "rejected");
+    }
+    // The publication deadline must not shorten the confirmation window for
+    // a card already accepted within the grant.
+    const sendSignal = remaining === undefined ? draft.signal : AbortSignal.any([draft.signal, AbortSignal.timeout(remaining)]);
     const { guildId, id: channelId } = channel;
+    const body = {
+      content, allowed_mentions: { parse: [], replied_user: false }, flags: MessageFlags.SuppressEmbeds,
+    } satisfies RESTPostAPIChannelMessageJSONBody;
     this.draft = draft;
     this.sending = true;
     try {
-      const sent = await channel.send({
-        content, allowedMentions: { parse: [], repliedUser: false }, flags: MessageFlags.SuppressEmbeds,
+      // Unlike channel.send, the REST route accepts a signal for both the queue and the request.
+      const sent = await channel.client.rest.post(Routes.channelMessages(channelId), {
+        body, signal: sendSignal,
       }).catch(() => {
-        // Discord may have posted the card despite the failure. Keep the slot
-        // until expiry or session end; never bind a guess to an unknown message.
+        // Even an abort may occur after transmission. Never infer a receipt or
+        // retry; keep the slot fenced until expiry or revocation.
         throw new DeliveryError("Voice work proposal delivery is uncertain; it cannot be confirmed.", "uncertain");
       });
       if (this.current() !== draft) {
         throw new DeliveryError("The voice work proposal is no longer active and cannot be confirmed.", "rejected");
       }
-      if (!/^[0-9]{1,20}$/.test(sent.id) || sent.author.id !== accountId || !sent.author.bot ||
-        sent.channelId !== channelId || sent.guildId !== guildId || sent.content !== content ||
-        !Number.isSafeInteger(sent.createdTimestamp)) {
-        throw new DeliveryError("Discord did not verify the voice work proposal; it cannot be confirmed.", "uncertain");
+      if (postDeadline !== undefined && performance.now() >= postDeadline) {
+        throw new DeliveryError("The voice work proposal was not confirmed before posting permission expired.", "uncertain");
       }
+      const unverified = () => new DeliveryError("Discord did not verify the voice work proposal; it cannot be confirmed.", "uncertain");
+      // Create Message can omit guild_id: the authenticated, bound guild channel
+      // and the exact channel_id still identify the destination.
+      if (!Value.Check(receiptSchema, sent) || BigInt(sent.id) > MAX_SNOWFLAKE ||
+        sent.author.id !== accountId || sent.channel_id !== channelId ||
+        (sent.guild_id !== undefined && sent.guild_id !== guildId) || sent.content !== content) throw unverified();
+      const createdTimestamp = Date.parse(sent.timestamp);
+      if (!Number.isSafeInteger(createdTimestamp)) throw unverified();
       this.draft = {
-        signal, startedAt: Date.now(),
-        posted: { id: sent.id, createdTimestamp: sent.createdTimestamp, accountId, ownerId, guildId, channelId, work },
+        ...draft, startedAt: Date.now(),
+        posted: { id: sent.id, createdTimestamp, accountId, ownerId, guildId, channelId, work },
       };
     } finally {
       this.sending = false;
@@ -108,7 +147,9 @@ export class VoiceDrafts {
   }
 
   clear(): void {
+    const draft = this.draft;
     this.draft = null;
+    draft?.controller.abort();
   }
 
   private current(): Draft | null {

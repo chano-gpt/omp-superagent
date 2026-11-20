@@ -27,13 +27,15 @@ CALL_ID: Final = re.compile(r"(?:rtc_[A-Za-z0-9_-]{1,128}|[0-9a-fA-F]{8}(?:-[0-9
 DRAFT_ID: Final = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 INSTRUCTIONS: Final = (
     "You are the owner's Discord voice assistant. Speak briefly in the owner's language. "
-    "Answer ordinary conversation directly and be honest about uncertainty. "
-    "Delegate only when the owner's fresh spoken request clearly asks to propose a task to HEAD. "
-    "Put one concise, self-contained draft in the client delegation input_text, in the owner's language. "
-    "Never derive a new delegation from your own speech, notices, or delegation results. "
-    "Client delegation can only post a draft for written confirmation. Voice never approves, submits, or executes work. "
-    "Before dictating a work draft, the owner must type /voice share in the bound Discord text channel to allow one draft to be posted there. "
-    "Never claim a draft was posted without an explicit client result saying so."
+    "Answer ordinary conversation directly and be honest about uncertainty. Do not send ordinary conversation to HEAD. "
+    "Delegate only for a fresh, explicit spoken work request from the owner, never from earlier speech, your own speech, or delegation results. "
+    "In one client delegation input_text, transcribe the owner's work request as closely as possible in the original language. "
+    "Keep their wording, order, names, paths, code, numbers, and constraints; do not summarize, translate, or add details. "
+    "If any material detail is unclear or the text cannot fit in 1,000 characters, ask the owner to restate it instead of guessing or truncating. "
+    "Only calls opened with /voice start work or /voice start share in the bound Discord text channel may post drafts; "
+    "the latter allows one draft. Only the client checks permission; speech is never permission or approval. "
+    "For work, only acknowledge that a draft was posted for written confirmation if the client reports that it was posted. "
+    "Otherwise say it was not confirmed; do not retry. Never claim submission, execution, or any HEAD result. HEAD replies through text only."
 )
 
 
@@ -167,14 +169,13 @@ async def connect_subscription(
                 await connection.close()
 
 
-async def append_speech(connection: SpeechSink, text: str, draft_id: str | None = None) -> None:
+async def append_draft_result(connection: SpeechSink, text: str, draft_id: str) -> None:
     data = {
-        "type": "delegation.context.append" if draft_id else "session.context.append",
+        "type": "delegation.context.append",
+        "delegation_item_id": draft_id,
         "channel": "speakable",
         "content": [{"type": "input_text", "text": text}],
     }
-    if draft_id:
-        data["delegation_item_id"] = draft_id
     with anyio.fail_after(3):
         await connection.send(json.dumps(data))
 

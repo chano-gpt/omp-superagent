@@ -16,7 +16,8 @@ Gateway가 메신저 연결과 헤드 수명을 맡고, 모든 요청·후속 �
 관리 RPC Host의 동일 프로세스 native TUI/herdr attach는 지원하지 않는다.
 
 선택 기능인 [Discord 실시간 음성채팅](discord-voice.md)은 일반 대화를 별도 OpenAI Live 세션에서
-처리한다. 음성 모델이 제안한 작업은 소유자가 원래 텍스트 채널에서 서면으로 확인해야 HEAD에 접수된다.
+처리한다. `/voice start work`로 시작하면 말로 요청한 작업을 지정 텍스트 채널에 초안으로 게시할 수 있다.
+소유자가 해당 초안에 `/voice confirm`으로 답장해야 HEAD에 접수되며, 결과는 Discord 텍스트로만 받는다.
 
 ### 레인 관리 도구와 운영 스킬
 

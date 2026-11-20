@@ -120,10 +120,13 @@ Alternative: Discord voice with separately billed OpenAI Live API (no Codex logi
   not in JSON; never reuse a messenger token. Omitting auth selects the existing API mode, not subscription.
 
   Owner commands are ordinary Discord messages in the configured text channel, not CLI or registered slash commands:
-    /voice start    Join the configured voice channel first, then send this to open the call.
-    /voice share    Subscription only: allow one draft to be posted here within one minute. API mode posts drafts directly.
-    /voice confirm  Reply to the exact posted draft to submit it to HEAD. Separate approvals still apply.
-    /voice stop     End the call.
+    /voice start        Join the configured voice channel first, then start a conversation without work drafts.
+    /voice start work   Start a new call that may publish spoken work drafts in this text channel.
+    /voice start share  Subscription only: start a new call that may publish one draft within one minute of readiness.
+    /voice work off     Revoke posting and invalidate any unconfirmed draft without ending the call.
+    /voice confirm      Reply to the exact posted draft to submit it to HEAD. Separate approvals still apply.
+    /voice stop         End the call. Only a new call can enable work drafts.
+  Live answers ordinary conversation by voice. HEAD replies only in Discord text.
   Full guide: ${join(import.meta.dir, "../docs/discord-voice.md")}
 `;
 

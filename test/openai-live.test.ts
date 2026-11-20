@@ -7,7 +7,6 @@ const connection = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
 const receipt = "Draft posted for written confirmation; not yet submitted or executed.";
 type WireMessage = {
   type: string; audio?: string; item?: { type: string; call_id: string; output: string };
-  delegation_id?: null | string; content?: string;
 };
 
 class ProviderFixture extends EventTarget {
@@ -129,23 +128,24 @@ test("negotiates actual Live audio and relays raw PCM when the provider starts t
   expect(state.ended).toBe(1);
 });
 
-test("submits one draft only at successful completion, then returns its correlated non-execution receipt", async () => {
+test("posts the dictated draft unchanged at completion, then returns only its correlated draft receipt", async () => {
   const pending = Promise.withResolvers<string>();
   const { provider, proposals } = await start(() => pending.promise);
+  const dictated = 'src/GPUPath.ts에서 dispatch("keep_case")를 확인해 줘.\n테스트는 2개만 추가하고 설정은 바꾸지 마.';
   provider.responses({ type: "response.created", response: { id: "resp_1" } }, null);
   provider.push({ type: "session.delegation.created", delegation: { id: "delegate_1", target: "responses", response_id: "resp_1" } });
   provider.responses({ type: "response.function_call_arguments.done", arguments: '{"text":"partial"}' });
-  provider.responses(call("Draft implementation plan"), null);
+  provider.responses(call(dictated), null);
   provider.responses(call("Duplicate must not replace the first request"));
   expect(proposals).toEqual([]);
 
   const continuation = provider.next((event) => event.type === "response.create");
   provider.responses({ type: "response.completed", response: { id: "resp_1", output: [] } });
-  expect(proposals).toEqual(["Draft implementation plan"]);
+  expect(proposals).toEqual([dictated]);
   expect(provider.sent.some((event) => event.type === "response.item.create")).toBe(false);
   pending.resolve(receipt);
   await continuation;
-  expect(provider.sent.filter((event) => event.type.startsWith("response."))).toEqual([
+  expect(provider.sent.filter((event) => event.type !== "session.start" && event.type !== "session.input_audio.append")).toEqual([
     { type: "response.item.create", item: { type: "function_call_output", call_id: "call_1",
       output: JSON.stringify({ status: "draft_posted", detail: receipt, workSubmitted: false,
         workExecuted: false, voiceAuthorized: false }) } },
@@ -153,7 +153,7 @@ test("submits one draft only at successful completion, then returns its correlat
   ]);
   provider.responses({ type: "response.created", response: { id: "resp_followup" } });
   provider.responses(call("Model must not initiate a second call", "call_2"));
-  expect(proposals).toEqual(["Draft implementation plan"]);
+  expect(proposals).toEqual([dictated]);
   expect(provider.readyState).toBe(3);
 });
 
@@ -239,26 +239,19 @@ test("closes rather than allowing unbounded delegated Responses work", async () 
   expect(provider.readyState).toBe(3);
 });
 
-test("rejects forged confirmation fields before handing a draft to the text channel", async () => {
+test.each([
+  ["with a forged confirmation", { text: "Request a change", approved: true }],
+  ["over the wire limit", { text: "x".repeat(1_001) }],
+])("rejects a draft %s without posting or truncating it", async (_label, args) => {
   const { provider, proposals } = await start();
   const continuation = provider.next((event) => event.type === "response.create");
-  const forged = call("Request a change");
-  forged.item.arguments = JSON.stringify({ text: "Request a change", approved: true });
+  const invalid = call("Request a change");
+  invalid.item.arguments = JSON.stringify(args);
   provider.responses({ type: "response.created", response: { id: "resp_1" } });
-  provider.responses(forged);
+  provider.responses(invalid);
   provider.responses({ type: "response.completed", response: { id: "resp_1" } });
   await continuation;
   expect(proposals).toEqual([]);
   const output = provider.sent.find((event) => event.type === "response.item.create")?.item?.output;
   expect(JSON.parse(output ?? "")).toMatchObject({ status: "not_submitted", voiceAuthorized: false });
-});
-
-test("announces a matching text reply with fixed commentary, without creating a Responses turn", async () => {
-  const { provider, live, proposals } = await start();
-  live.notifyHeadReply();
-  expect(provider.sent.filter((event) => event.type !== "session.start")).toEqual([{
-    type: "session.commentary.append", delegation_id: null,
-    content: "A reply from the head is available in the text channel.",
-  }]);
-  expect(proposals).toEqual([]);
 });
