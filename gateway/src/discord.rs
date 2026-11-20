@@ -75,8 +75,7 @@ pub struct Discord {
 
 impl Discord {
     pub fn new(config: &Value, ctx: Context) -> Result<Self> {
-        let policy: Config =
-            serde_json::from_value(config.clone()).context("Invalid Discord config")?;
+        let policy = Config::deserialize(config).context("Invalid Discord config")?;
         anyhow::ensure!(
             snowflake(&policy.owner_id)
                 && policy.allowed_guild_ids.iter().all(|id| snowflake(id))
@@ -162,17 +161,12 @@ impl Adapter for Discord {
             ("createThread", [route, title, extra @ ..]) if extra.len() <= 2 => {
                 let source = extra
                     .first()
-                    .map(read::<Option<String>>)
+                    .map(read::<Option<&str>>)
                     .transpose()?
                     .flatten();
                 let tags = extra.get(1).map(read::<Vec<String>>).transpose()?;
                 state
-                    .create_thread(
-                        &read(route)?,
-                        &read::<String>(title)?,
-                        source.as_deref(),
-                        tags.as_deref(),
-                    )
+                    .create_thread(&read(route)?, read(title)?, source, tags.as_deref())
                     .await
             }
             ("inspectThread", [route]) => state.inspect_thread(&read(route)?).await,
@@ -182,9 +176,7 @@ impl Adapter for Discord {
             ("inspectDiscordContext", [route]) => state.inspect_context(&read(route)?).await,
             ("discordPurpose", [request]) => state.purpose(read(request)?).await,
             ("fetchAfter", [route, cursor]) => {
-                state
-                    .fetch_after(&read(route)?, &read::<String>(cursor)?)
-                    .await
+                state.fetch_after(&read(route)?, read(cursor)?).await
             }
             _ => Err(EffectError::rejected(
                 "Unsupported Discord operation or arguments",

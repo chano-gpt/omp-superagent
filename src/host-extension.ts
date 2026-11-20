@@ -9,9 +9,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { lookup as lookupSetting } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { pickDefaultAvailableModel, resolveModelRoleValue } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
-import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { parseSessionEntries, readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { HostChannel, indexServiceCompletions, serviceGenerationKey, type Frame, type ServiceUnit } from "./host-protocol";
-import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { fitAbortAndRestoreQueueResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type { RpcAbortAndRestoreQueueResult, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
@@ -133,12 +132,17 @@ export default function hostExtension(pi: ExtensionAPI): void {
     return { modelRoles: session.settings.getModelRoles(),
       defaultThinkingLevel: cfgDefaultThinkingLevel.get(readOnly(session.settings)) };
   };
+  type NativeSession = InstanceType<typeof pi.pi.AgentSession>;
+  // The view is live: callers only inspect it synchronously, before appending
+  // or yielding. Older supported CLIs may expose only the copying API.
+  const entries = (manager: NativeSession["sessionManager"]) =>
+    typeof manager.getEntriesView === "function" ? manager.getEntriesView() : manager.getEntries();
   const observation = (customType: string, data: Frame) => {
     const { session, id, file } = exact();
     try {
       pi.appendEntry(customType, { ...data, sessionId: id, sessionFile: file, instanceKey: session.instanceKey });
       session.sessionManager.flushSync();
-      const entry = session.sessionManager.getEntries().at(-1);
+      const entry = entries(session.sessionManager).at(-1);
       if (entry?.type !== "custom" || entry.customType !== customType)
         throw new Error("Native observation entry identity is unavailable");
       return entry.id;
@@ -149,11 +153,6 @@ export default function hostExtension(pi: ExtensionAPI): void {
     const registry = pi.pi.AgentRegistry.global();
     const refs = registry.list();
     const refEpoch = refs.map(ref => [ref.id, ref.generation, ref.parentId, ref.session?.instanceKey, ref.sessionFile]);
-    type NativeSession = InstanceType<typeof pi.pi.AgentSession>;
-    // A manager-owned view is used only during a synchronous scan. Older
-    // supported CLIs may expose only the copying API.
-    const entries = (manager: NativeSession["sessionManager"]) =>
-      typeof manager.getEntriesView === "function" ? manager.getEntriesView() : manager.getEntries();
     const lineage: { readonly agentId: string; readonly sessionId: string; readonly sessionFile: unknown }[] = [];
     const recordedAgents = new Set<string>();
     const children = new Map<string, string[]>();
@@ -518,10 +517,13 @@ export default function hostExtension(pi: ExtensionAPI): void {
     if (event.sessionId && event.sessionId !== sessionId) return;
     // Advisor calls share the primary runner for approval, which does not
     // carry the advisor identity on this event. Require one exact session/call.
-    const starts = [...serviceStarts].filter(([, start]) =>
-      start.sessionId === sessionId && start.toolCallId === event.toolCallId);
-    const [matched] = starts;
-    if (starts.length === 1 && matched) finishWithoutServiceResult(matched[0], "approval_denied");
+    let matched: string | undefined;
+    for (const [key, start] of serviceStarts) {
+      if (start.sessionId !== sessionId || start.toolCallId !== event.toolCallId) continue;
+      if (matched !== undefined) return;
+      matched = key;
+    }
+    if (matched !== undefined) finishWithoutServiceResult(matched, "approval_denied");
   });
   pi.on("message_end", (event, ctx) => {
     const message = event.message;
@@ -569,7 +571,7 @@ export default function hostExtension(pi: ExtensionAPI): void {
     await ctx.sessionManager.ensureOnDisk();
     if (exact().ref !== identity.ref) throw new Error("Native session changed during materialization");
     identity.session.sessionManager.flushSync();
-    const journal = identity.session.sessionManager.getEntries();
+    const journal = entries(identity.session.sessionManager);
     if (!journal.some(entry => entry.type === "custom" && entry.customType === "superagent_service_tracking")) {
       identity.session.sessionManager.appendCustomEntry("superagent_service_tracking", {
         rootSessionId: identity.id, known: !journal.some(entry =>

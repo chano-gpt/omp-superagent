@@ -38,15 +38,6 @@ pub(super) fn decode<'de, T: Deserialize<'de>>(value: &'de Value) -> Result<T, E
     T::deserialize(value).map_err(|_| EffectError::rejected("Malformed Telegram effect arguments"))
 }
 
-// Without a custom field deserializer Serde accepts a missing nullable field.
-pub(super) fn nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::deserialize(deserializer)
-}
-
 fn optional_topic<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
     let topic = String::deserialize(deserializer)?;
     if topic.is_empty() || topic.encode_utf16().count() > 128 {
@@ -61,10 +52,11 @@ pub(super) struct Route {
     pub platform: String,
     pub account_id: String,
     pub authority_id: String,
-    #[serde(deserialize_with = "nullable")]
+    // These nullable route fields must still be present on the wire.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub guild_id: Option<String>,
     pub channel_id: String,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub thread_id: Option<String>,
     #[serde(
         default,

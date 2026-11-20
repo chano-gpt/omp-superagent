@@ -227,13 +227,15 @@ fn json_equal(left: &Value, right: &Value, ordered: bool) -> bool {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| json_equal(x, y, ordered))
         }
         (Value::Object(a), Value::Object(b)) if ordered => {
-            let ordered_names = |map: &serde_json::Map<String, Value>| {
+            if a.len() != b.len() {
+                return false;
+            }
+            let [left_keys, right_keys] = [a, b].map(|map| {
                 let mut keys: Vec<_> = map.keys().map(String::as_str).collect();
                 keys.sort_by_key(|key| js_array_index(key));
-                keys.into_iter().map(str::to_owned).collect::<Vec<_>>()
-            };
-            a.len() == b.len()
-                && ordered_names(a) == ordered_names(b)
+                keys
+            });
+            left_keys == right_keys
                 && a.iter()
                     .all(|(key, x)| b.get(key).is_some_and(|y| json_equal(x, y, ordered)))
         }

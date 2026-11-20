@@ -201,7 +201,7 @@ impl Link<'_> {
                                 anyhow::bail!("Discord Gateway sent an event before authentication");
                             }
                             if event == "READY" {
-                                let ready: Ready = serde_json::from_value(frame.d.clone())
+                                let ready = Ready::deserialize(&frame.d)
                                     .map_err(|_| anyhow::anyhow!("Discord Gateway READY is invalid"))?;
                                 let url = gateway_url(&ready.resume_gateway_url)?;
                                 if ready.authenticate(state).is_err() || ready.session_id.is_empty() {

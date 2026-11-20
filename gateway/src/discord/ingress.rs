@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::mpsc;
@@ -252,7 +253,7 @@ impl State {
         if !self.allowed_guild(guild)
             || raw["webhook_id"].is_string()
             || (raw["author"].is_object()
-                && !serde_json::from_value::<User>(raw["author"].clone())
+                && !User::deserialize(&raw["author"])
                     .is_ok_and(|user| user.id == self.config.owner_id && !user.bot))
         {
             return Ok(());
@@ -269,7 +270,7 @@ impl State {
         let Ok(route) = self.route_for(&channel) else {
             return Ok(());
         };
-        let (message, fetched_raw) = match serde_json::from_value::<Message>(raw.clone()) {
+        let (message, fetched_raw) = match Message::deserialize(&raw) {
             Ok(message)
                 if create
                     || (raw.get("edited_timestamp").is_some()
@@ -283,14 +284,14 @@ impl State {
                     .rest
                     .get(&format!("channels/{channel_id}/messages/{id}"))
                     .await?;
-                let message: Message = serde_json::from_value(found.clone())
+                let message = Message::deserialize(&found)
                     .map_err(|_| broken("Discord edit could not be verified"))?;
                 (message, Some(found))
             }
         };
         // Gate controls even on partial edits whose resource omitted a guild ID.
         if let Some(voice) = &self.voice {
-            let mut resource = fetched_raw.unwrap_or(raw.clone());
+            let mut resource = fetched_raw.unwrap_or_else(|| raw.clone());
             resource["guild_id"] = json!(route.guild_id);
             if voice.is_control(&resource) {
                 return Ok(());
@@ -341,7 +342,7 @@ impl State {
             let mut messages =
                 page.into_iter()
                     .map(|mut raw| {
-                        let message: Message = serde_json::from_value(raw.clone())
+                        let message = Message::deserialize(&raw)
                             .map_err(|_| broken("Discord history contained an invalid message"))?;
                         let id = message.id.parse::<u64>().map_err(|_| {
                             broken("Discord history contained an invalid message ID")

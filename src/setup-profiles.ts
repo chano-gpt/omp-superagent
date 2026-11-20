@@ -1,9 +1,8 @@
 import { readFileSync } from "node:fs";
-import { REST, Routes, type RESTOptions } from "discord.js";
-import { Api, InputFile } from "grammy";
+import type { REST, RESTOptions } from "discord.js";
+import type { Api } from "grammy";
 import type { Config } from "./config";
 import { validateCredential } from "./credentials";
-import { withTelegramSignal } from "./telegram-signal";
 
 const avatar = new URL("../assets/superagent-avatar.jpg", import.meta.url);
 
@@ -32,6 +31,7 @@ export async function setupBotProfiles(
     try {
       const token = credentials[config.discord.tokenEnv]!;
       validateCredential(token);
+      const { REST, Routes } = await import("discord.js");
       const rest = (options.createRest ?? ((settings, credential) => new REST(settings).setToken(credential)))(
         { version: "10", retries: 0, rejectOnRateLimit: () => true }, token,
       );
@@ -60,6 +60,8 @@ export async function setupBotProfiles(
     try {
       const token = credentials[config.telegram.tokenEnv]!;
       validateCredential(token);
+      const { Api, InputFile } = await import("grammy");
+      const { withTelegramSignal } = await import("./telegram-signal");
       const api = (options.createApi ?? (credential => new Api(credential, {
         sensitiveLogs: false, timeoutSeconds: 45, baseFetchConfig: { redirect: "error" },
       })))(token);

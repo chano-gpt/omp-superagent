@@ -67,23 +67,27 @@ impl Core {
                         "Telegram output does not support Discord reply references",
                     ));
                 }
-                Ok(json!(self.send_output(&me, decode(output)?).await?))
+                self.send_output(&me, decode(output)?)
+                    .await
+                    .map(Value::String)
             }
             ("setActivity", [message, activity]) => {
                 self.set_activity(&me, decode(message)?, decode(activity)?)
                     .await?;
                 Ok(Value::Null)
             }
-            ("showApproval", [approval]) => {
-                Ok(json!(self.show_approval(&me, decode(approval)?).await?))
-            }
+            ("showApproval", [approval]) => self
+                .show_approval(&me, decode(approval)?)
+                .await
+                .map(Value::String),
             ("dismissApproval", [approval]) => {
                 self.dismiss_approval(&me, decode(approval)?).await?;
                 Ok(Value::Null)
             }
-            ("canCreateThread", [route]) => {
-                Ok(json!(self.can_create_thread(&me, &decode(route)?).await?))
-            }
+            ("canCreateThread", [route]) => self
+                .can_create_thread(&me, &decode(route)?)
+                .await
+                .map(Value::Bool),
             ("createThread", [route, title] | [route, title, _]) => Ok(json!(
                 self.create_thread(&me, decode(route)?, decode(title)?)
                     .await?

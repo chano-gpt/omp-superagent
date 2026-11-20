@@ -11,7 +11,7 @@ use super::{
     dialog::{Answer, Dialog},
     effects::topic_payload,
     ingress::Message,
-    model::{Identity, Route, hash, nullable},
+    model::{Identity, Route, hash},
     view::{Renderer, View},
 };
 
@@ -27,7 +27,7 @@ pub(super) struct Approval {
     pub route: Route,
     pub request: Value,
     pub state: String,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub remote_id: Option<String>,
     pub decision: Option<Value>,
     pub owner_context: Option<String>,

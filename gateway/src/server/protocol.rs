@@ -180,20 +180,21 @@ async fn dispatch(hub: &Arc<Hub>, finish: OnFinish, request: Request) -> WireRes
         hub.can_restart(revision)?;
         return hub.restart(object(&data)?, finish).await;
     }
-    let data = read_json(body).await?;
-    let data = object(&data)?;
+    let Value::Object(data) = read_json(body).await? else {
+        return Err(rejected("Invalid Gateway request"));
+    };
     match endpoint {
         "/ready" => hub.mark_ready(revision)?,
-        "/receipt" => hub.receipt(revision, data)?,
+        "/receipt" => hub.receipt(revision, &data)?,
         "/detach" => hub.detach(revision)?,
-        "/route" => hub.assert_route(revision, data).await?,
+        "/route" => hub.assert_route(revision, &data).await?,
         "/effect" => {
             hub.state()?.controller(revision)?;
             return Ok(Json(hub.effect(data).await?).into_response());
         }
         "/attachment" => {
             hub.state()?.controller(revision)?;
-            return hub.attachment(data).await;
+            return hub.attachment(&data).await;
         }
         _ => return Err(rejected("Unknown Gateway operation")),
     }

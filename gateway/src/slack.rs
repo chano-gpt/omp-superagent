@@ -74,8 +74,7 @@ impl Inner {
 
 impl Slack {
     pub fn new(config: &Value, ctx: Context) -> anyhow::Result<Self> {
-        let config: Config =
-            serde_json::from_value(config.clone()).context("invalid Slack configuration")?;
+        let config = Config::deserialize(config).context("invalid Slack configuration")?;
         ensure!(
             slack_id(&config.team_id) && config.team_id.starts_with('T'),
             "invalid Slack workspace ID"

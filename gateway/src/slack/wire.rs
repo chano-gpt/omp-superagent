@@ -15,21 +15,14 @@ pub(super) struct Route {
     pub(super) platform: String,
     pub(super) account_id: String,
     pub(super) authority_id: String,
-    #[serde(deserialize_with = "required_option")]
+    // These nullable route fields must still be present on the wire.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(super) guild_id: Option<String>,
     pub(super) channel_id: String,
-    #[serde(deserialize_with = "required_option")]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub(super) thread_id: Option<Ts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) topic_id: Option<String>,
-}
-
-fn required_option<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::deserialize(d)
 }
 
 impl Route {
@@ -53,7 +46,7 @@ impl Route {
         if let Some(topic) = &self.topic_id {
             key.push(json!(topic));
         }
-        json!(key).to_string()
+        Value::Array(key).to_string()
     }
 }
 

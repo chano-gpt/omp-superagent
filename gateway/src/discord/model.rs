@@ -1,12 +1,11 @@
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{Effect, EffectError};
 
-pub(super) fn read<T: DeserializeOwned>(value: &Value) -> Effect<T> {
-    serde_json::from_value(value.clone())
-        .map_err(|_| EffectError::rejected("Invalid Discord effect arguments"))
+pub(super) fn read<'de, T: Deserialize<'de>>(value: &'de Value) -> Effect<T> {
+    T::deserialize(value).map_err(|_| EffectError::rejected("Invalid Discord effect arguments"))
 }
 
 pub(super) fn snowflake(id: &str) -> bool {

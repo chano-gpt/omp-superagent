@@ -9,7 +9,7 @@ use crate::adapter::EffectError;
 
 use super::{
     Core,
-    model::{Route, SAFE_INTEGER, decode, file_id, hash, nullable},
+    model::{Route, SAFE_INTEGER, decode, file_id, hash},
 };
 
 const DOWNLOAD_LIMIT: u64 = 20 * 1024 * 1024;
@@ -44,7 +44,7 @@ struct FileIdentity {
     id: String,
     name: String,
     url: String,
-    #[serde(deserialize_with = "nullable")]
+    #[serde(deserialize_with = "Option::deserialize")]
     size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content_type: Option<String>,

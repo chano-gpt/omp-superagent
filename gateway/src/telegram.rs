@@ -22,10 +22,8 @@ use async_trait::async_trait;
 use futures_util::{future::BoxFuture, future::Shared};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::{
-    sync::{Mutex, RwLock, watch},
-    task::JoinSet,
-};
+use tokio::sync::{Mutex, RwLock, watch};
+use tokio_util::task::AbortOnDropHandle;
 use uuid::Uuid;
 
 use crate::adapter::{Adapter, Context, EffectError};
@@ -87,7 +85,7 @@ fn ledger_error() -> EffectError {
 
 struct Run {
     stop: watch::Sender<bool>,
-    tasks: JoinSet<()>,
+    poll: AbortOnDropHandle<()>,
 }
 
 /// Configured Telegram transport; construction does not contact Telegram.
@@ -99,8 +97,7 @@ pub struct Telegram {
 impl Telegram {
     /// Loads only the configured credential and validates the owner/chat policy.
     pub fn new(config: &Value, ctx: Context) -> anyhow::Result<Self> {
-        let config: Config =
-            serde_json::from_value(config.clone()).context("Invalid Telegram configuration")?;
+        let config = Config::deserialize(config).context("Invalid Telegram configuration")?;
         let policy = Policy::new(&config.owner_id, &config.allowed_chat_ids)?;
         let token = std::env::var(config.token_env)
             .map_err(|_| anyhow::anyhow!("Missing or invalid Telegram credential"))?;
@@ -170,19 +167,19 @@ impl Adapter for Telegram {
         let cursor = Cursor::load(&self.core.ctx, me.id)?;
         *self.core.identity.write().await = Some(me);
         let (stop, signal) = watch::channel(false);
-        let mut tasks = JoinSet::new();
-        tasks.spawn(poll::run(self.core.clone(), cursor, signal));
-        *run = Some(Run { stop, tasks });
+        let poll =
+            AbortOnDropHandle::new(tokio::spawn(poll::run(self.core.clone(), cursor, signal)));
+        *run = Some(Run { stop, poll });
         Ok(())
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
         let mut run = self.run.lock().await;
-        let result = if let Some(mut active) = run.take() {
+        let result = if let Some(active) = run.take() {
             active.stop.send_replace(true);
-            active.tasks.join_next().await.transpose()
+            active.poll.await
         } else {
-            Ok(None)
+            Ok(())
         };
         *self.core.identity.write().await = None;
         self.core.cards.lock().await.clear();

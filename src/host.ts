@@ -113,19 +113,18 @@ class SocketProcess implements RpcAgentProcess {
     }
     const { promise, resolve, reject } = Promise.withResolvers<void>();
     const finish = (error?: Error | null) => {
-      if (!this.#pending.delete(fail)) return;
+      if (!this.#pending.delete(finish)) return;
       clearTimeout(timer);
       if (error) reject(error);
       else resolve();
     };
-    const fail = (error: Error) => finish(error);
     const timer = setTimeout(() => {
       const error = new Error("RPC socket write timed out; request outcome may be unknown");
       finish(error);
       this.socket.destroy(error);
     }, CONNECT_TIMEOUT_MS);
     timer.unref();
-    this.#pending.add(fail);
+    this.#pending.add(finish);
     try { this.socket.write(data, finish); }
     catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
     return promise;

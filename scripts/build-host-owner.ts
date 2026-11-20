@@ -187,7 +187,10 @@ if (isInstall && manifests.every(exists => !exists)) {
   const staticLinux = isPackage && process.platform === "linux";
   const target = staticLinux ? `${arch}-unknown-linux-musl` : host;
   const sysroot = isPackage ? (await capture([rustc, "--print", "sysroot"])).trim() : undefined;
-  const linker = staticLinux && sysroot ? join(sysroot, "lib", "rustlib", host, "bin", "rust-lld") : undefined;
+  // Use the musl driver for both C and final linking: bundled Opus needs musl's libm.
+  const musl = staticLinux ? Bun.which("musl-gcc") : undefined;
+  if (staticLinux && !musl) throw new NativeBuildError("Packaging on Linux requires musl-gcc (Ubuntu: musl-tools)");
+  const cargoTarget = target.replaceAll("-", "_");
   for (const pkg of packages) {
     const isGateway = pkg.directory === "gateway";
     const gatewayMac = isGateway && process.platform === "darwin";
@@ -198,11 +201,6 @@ if (isInstall && manifests.every(exists => !exists)) {
       ? join((await capture(["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"])).trim(), "usr", "lib")
       : undefined;
     if (sqliteSdkLibDir) await access(join(sqliteSdkLibDir, "libsqlite3.tbd"));
-    // Bundled Linux SQLite, ring and bundled Opus need target C headers.
-    const muslCc = linker && isGateway ? Bun.which("musl-gcc") : undefined;
-    if (linker && isGateway && !muslCc) {
-      throw new NativeBuildError("Packaging omp-gateway on Linux requires musl-gcc (Ubuntu: musl-tools)");
-    }
     const child = Bun.spawn([
       cargo, "build", "--release", "--locked", "--manifest-path", pkg.manifest, "--bin", pkg.binary,
       "--target-dir", pkg.targetDir, "--target", target,
@@ -215,8 +213,7 @@ if (isInstall && manifests.every(exists => !exists)) {
         // libopus_sys adds Homebrew's lib directory even in bundled mode.
         // Use the selected Rust/CMake binaries but keep brew out of this build.
         ...(gatewayMac && isPackage && cmake && { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", RUSTC: rustc, CMAKE: cmake }),
-        ...(linker && { CARGO_ENCODED_RUSTFLAGS: `-Clinker=${linker}\x1f-Clinker-flavor=ld.lld\x1f-Clink-self-contained=yes` }),
-        ...(muslCc && { [`CC_${target.replaceAll("-", "_")}`]: muslCc }),
+        ...(musl && { [`CC_${cargoTarget}`]: musl, [`CARGO_TARGET_${cargoTarget.toUpperCase()}_LINKER`]: musl }),
       },
       stdin: "ignore", stdout: "inherit", stderr: "inherit",
     });

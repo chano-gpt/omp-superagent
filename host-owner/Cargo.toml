@@ -15,7 +15,7 @@ base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 # Stock RPC v1 keeps the first object fields when a large event must be shrunk.
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 
 [profile.release]

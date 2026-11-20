@@ -10,18 +10,23 @@ use super::{
 use crate::store::{EffectStart, PHYSICAL_ROUTE_FIELDS, js_trim};
 
 impl Hub {
-    pub(super) async fn effect(self: &Arc<Self>, data: &Map<String, Value>) -> WireResult<Value> {
+    pub(super) async fn effect(
+        self: &Arc<Self>,
+        mut data: Map<String, Value>,
+    ) -> WireResult<Value> {
         let (id, operation, args) = match (
-            data.get("id")
-                .and_then(Value::as_str)
-                .filter(|id| effect_id(id)),
-            data.get("operation").and_then(Value::as_str),
-            data.get("args").and_then(Value::as_array),
+            data.remove("id"),
+            data.remove("operation"),
+            data.remove("args"),
         ) {
-            (Some(id), Some(operation), Some(args)) => (id, operation, args),
+            (Some(Value::String(id)), Some(Value::String(operation)), Some(Value::Array(args)))
+                if effect_id(&id) =>
+            {
+                (id, operation, args)
+            }
             _ => return Err(rejected("Invalid Gateway effect")),
         };
-        let allowed = match operation {
+        let allowed = match operation.as_str() {
             "send"
             | "showApproval"
             | "dismissApproval"
@@ -36,18 +41,15 @@ impl Hub {
         if !allowed {
             return Err(rejected("Unknown Gateway effect"));
         }
-        if let EffectStart::Previous(result) = self.store.begin_effect(id, operation, args)? {
+        if let EffectStart::Previous(result) = self.store.begin_effect(&id, &operation, &args)? {
             return Ok(result);
         }
         let (send, result) = oneshot::channel();
         let hub = Arc::clone(self);
-        let id = id.to_owned();
-        let operation = operation.to_owned();
-        let args = args.clone();
         // An HTTP cancellation is not permission to cancel a remote mutation
         // after its attempt has been journaled. Shutdown drains this task too.
         drop(self.effects.spawn(async move {
-            let result = match hub.dispatch_effect(&operation, args).await {
+            let result = match hub.dispatch_effect(&operation, &args).await {
                 Ok(value)
                     if value.is_null()
                         && matches!(operation.as_str(), "setActivity" | "dismissApproval") =>
@@ -63,8 +65,8 @@ impl Hub {
         Ok(result.await.map_err(anyhow::Error::from)??)
     }
 
-    async fn dispatch_effect(&self, operation: &str, mut args: Vec<Value>) -> WireResult<Value> {
-        match (operation, args.as_mut_slice()) {
+    async fn dispatch_effect(&self, operation: &str, args: &[Value]) -> WireResult<Value> {
+        match (operation, args) {
             ("send", [output]) => validate_reply(output)?,
             ("setActivity", [message, state]) => {
                 if !matches!(state.as_str(), Some("received" | "thinking" | "idle")) {
@@ -89,7 +91,7 @@ impl Hub {
             _ => {}
         }
         self.adapters
-            .effect(operation, &args)
+            .effect(operation, args)
             .await
             .map_err(Fault::from)
     }

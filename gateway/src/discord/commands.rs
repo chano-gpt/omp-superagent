@@ -27,7 +27,7 @@ struct OptionValue {
 }
 
 fn command(data: &Value) -> Option<String> {
-    let command: ChatCommand = serde_json::from_value(data.clone()).ok()?;
+    let command = ChatCommand::deserialize(data).ok()?;
     if command.kind != 1 {
         return None;
     }
@@ -89,8 +89,10 @@ impl State {
         {
             Ok(channel) => channel,
             Err(_) => {
-                return deny("Superagent could not verify this conversation; nothing was admitted.")
-                    .await;
+                return deny(
+                    "Superagent could not verify this conversation; nothing was admitted.",
+                )
+                .await;
             }
         };
         let Ok(route) = self.route_for(&channel) else {

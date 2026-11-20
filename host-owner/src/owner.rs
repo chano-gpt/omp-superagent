@@ -96,7 +96,7 @@ struct Identity {
 #[derive(Default)]
 pub(crate) struct State {
     peers: HashMap<String, Channel>,
-    pub(crate) ui: Vec<Value>,
+    pub(crate) ui: Vec<Arc<Value>>,
     pub(crate) requests: HashMap<String, String>,
     prompt_receipts: HashMap<String, u64>,
     pub(crate) goal_resumes: Vec<GoalResume>,
@@ -490,9 +490,9 @@ impl Owner {
                         .iter_mut()
                         .find(|request| request["id"] == frame["id"])
                     {
-                        *request = frame.clone();
+                        *request = Arc::clone(&packet.frame);
                     } else {
-                        state.ui.push(frame.clone());
+                        state.ui.push(Arc::clone(&packet.frame));
                     }
                 }
                 _ => {}
@@ -543,7 +543,7 @@ impl Owner {
         let control = self.control()?;
         let active = self.state()?.active_commands != 0;
         let rpc = if active { control } else { &self.native };
-        let mut native = data(rpc.request(json!({"type": "get_state"})).await?)?;
+        let native = data(rpc.request(json!({"type": "get_state"})).await?)?;
         let owned = data(control.request(json!({"type": "snapshot"})).await?)?;
         let identity = self
             .identity
@@ -564,17 +564,23 @@ impl Owner {
                 "Native owned work or durable observations cannot be authoritatively established; residency remains held",
             ));
         }
-        let native = native
-            .as_object_mut()
-            .ok_or(Error::Unavailable("Native state is unavailable"))?;
+        let Value::Object(mut native) = native else {
+            return Err(Error::Unavailable("Native state is unavailable"));
+        };
         let Value::Object(owned) = owned else {
             return Err(Error::Unavailable("Native state is unavailable"));
         };
         native.extend(owned);
         native.insert("adapterOwnerPid".to_owned(), json!(std::process::id()));
         native.insert("adapterProtocol".to_owned(), json!("owned-stock-stdio-v1"));
-        native.insert("pendingUiRequests".to_owned(), json!(self.state()?.ui));
-        Ok(Value::Object(std::mem::take(native)))
+        let pending_ui = self
+            .state()?
+            .ui
+            .iter()
+            .map(|request| request.as_ref().clone())
+            .collect();
+        native.insert("pendingUiRequests".to_owned(), Value::Array(pending_ui));
+        Ok(Value::Object(native))
     }
 
     fn inventory_request(self: &Arc<Self>, frame: Value, control: &Channel) -> Result<()> {

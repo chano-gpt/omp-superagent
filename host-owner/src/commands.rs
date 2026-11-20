@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use serde::Deserialize as _;
+use serde::{Deserialize as _, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, watch};
 
@@ -60,17 +60,17 @@ impl Command {
         self.name == "goal" && self.frame["op"] == "resume"
     }
 
-    fn respond(&self, peer: &Channel, mut response: Value) -> Result<()> {
+    fn respond(&self, peer: &Channel, response: Value) -> Result<()> {
         if peer.is_closed() {
             return Ok(());
         }
-        let response = response
-            .as_object_mut()
-            .ok_or(Error::Unavailable("Native response is unavailable"))?;
+        let Value::Object(mut response) = response else {
+            return Err(Error::Unavailable("Native response is unavailable"));
+        };
         response.insert("type".to_owned(), json!("response"));
         response.insert("command".to_owned(), json!(self.name));
         response.insert("id".to_owned(), json!(self.id));
-        peer.send(Value::Object(std::mem::take(response)))
+        peer.send(Value::Object(response))
     }
 }
 
@@ -80,7 +80,7 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
         .ok_or(Error::Unavailable("Invalid Host command"))?
         .to_owned();
     let id = frame["id"].as_str().map_or_else(new_id, str::to_owned);
-    let command = Command { frame, id, name };
+    let mut command = Command { frame, id, name };
     let mut state = owner.state()?;
     match command.name.as_str() {
         "extension_ui_response" => {
@@ -171,7 +171,7 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
         let peer = peer.clone();
         tokio::spawn(async move {
             let _capacity = capacity;
-            let result = maintenance(&owner, &command, &peer).await;
+            let result = maintenance(&owner, &mut command, &peer).await;
             if let Ok(mut state) = owner.state() {
                 state.maintenance_active = false;
                 if result.is_err() {
@@ -256,14 +256,10 @@ pub(crate) fn admit(owner: &Arc<Owner>, frame: Value, peer: &Channel) -> Result<
     };
     let peer = peer.clone();
     tokio::spawn(async move {
-        let mut forwarded = false;
         wait(previous_dispatch).await;
-        let result = execute(&admitted, &command, &peer, order, &mut forwarded).await;
+        let result = execute(&admitted, &mut command, &peer, order).await;
         let response = match result {
             Ok(value) => value,
-            Err(Error::TimedOut) if !forwarded && admitted.resume_token.is_some() => {
-                json!({"success": false, "error": "Goal resume cancelled before admission"})
-            }
             Err(error) if error.ambiguous() && !read_only => {
                 hold(&admitted.owner, &peer);
                 return;
@@ -346,7 +342,7 @@ async fn idle(owner: &Owner) -> Result<()> {
     }
 }
 
-async fn maintenance(owner: &Owner, command: &Command, peer: &Channel) -> Result<()> {
+async fn maintenance(owner: &Owner, command: &mut Command, peer: &Channel) -> Result<()> {
     let confirmed = async {
         idle(owner).await?;
         idle(owner).await
@@ -359,25 +355,19 @@ async fn maintenance(owner: &Owner, command: &Command, peer: &Channel) -> Result
         return Ok(());
     }
     let control = owner.control()?;
-    let mut response = control.request(command.frame.clone()).await?;
-    if response["success"] == false {
+    let mut response = control.request(std::mem::take(&mut command.frame)).await?;
+    let success = response["success"].as_bool().ok_or(Error::Disconnected)?;
+    if !success {
         let snapshot = data(control.request(json!({"type": "snapshot"})).await?)?;
         if snapshot["mutationHeld"] == true {
             owner.state()?.unresolved_effect = true;
         }
         sanitize_private_error(&mut response);
-        if command.respond(peer, response).is_err() {
-            peer.close();
-        }
-        return Ok(());
-    }
-    if response["success"] != true {
-        return Err(Error::Disconnected);
     }
     if command.respond(peer, response).is_err() {
         peer.close();
     }
-    if command.name == "shutdown_host" {
+    if success && command.name == "shutdown_host" {
         // This remains fenced even while a native shutdown ACK is awaiting
         // process exit; only the exit receipt can release the owner.
         owner.state()?.unresolved_effect = true;
@@ -406,10 +396,9 @@ fn sanitize_private_error(response: &mut Value) {
 
 async fn execute(
     admitted: &Admitted,
-    command: &Command,
+    command: &mut Command,
     peer: &Channel,
     order: Dispatch,
-    forwarded: &mut bool,
 ) -> Result<Value> {
     let owner = &admitted.owner;
     if command.interrupt() {
@@ -429,9 +418,16 @@ async fn execute(
         }
     }
     match command.name.as_str() {
-        "get_state" => return Ok(json!({"success": true, "data": owner.snapshot().await?})),
+        "get_state" => {
+            let mut response = json!({"success": true});
+            response["data"] = owner.snapshot().await?;
+            return Ok(response);
+        }
         "get_session_stats" => {
-            let mut response = owner.control()?.request(command.frame.clone()).await?;
+            let mut response = owner
+                .control()?
+                .request(std::mem::take(&mut command.frame))
+                .await?;
             sanitize_private_error(&mut response);
             return Ok(response);
         }
@@ -496,9 +492,10 @@ async fn execute(
             .requests
             .insert(id.clone(), command.id.clone());
     }
-    *forwarded = true;
     let wait = (command.name != "compact").then_some(LONG_TIMEOUT);
-    let request = owner.native.begin_request(command.frame.clone(), &id)?;
+    let request = owner
+        .native
+        .begin_request(std::mem::take(&mut command.frame), &id)?;
     // FIFO admission for input sharing a serial predecessor, without waiting
     // for the native response (which would serialize streaming input).
     drop(order.dispatch_done);
@@ -537,9 +534,21 @@ async fn fit(
     restored: &Value,
     remaining: &Value,
 ) -> Result<Value> {
-    let response = owner.helper.call(Operation::Fit, &json!({
-        "id": id, "restored": restored, "remaining": remaining, "maxResponseBytes": peer.max_response_bytes()?,
-    })).await?;
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FitInput<'a> {
+        id: &'a str,
+        restored: &'a Value,
+        remaining: &'a Value,
+        max_response_bytes: usize,
+    }
+    let input = FitInput {
+        id,
+        restored,
+        remaining,
+        max_response_bytes: peer.max_response_bytes()?,
+    };
+    let response = owner.helper.call(Operation::Fit, &input).await?;
     if response["success"] != true {
         return Err(Error::Unavailable(
             "Native restored queue response is unavailable",

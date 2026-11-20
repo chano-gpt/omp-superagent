@@ -101,8 +101,7 @@ impl Dispatcher {
                         .into_iter()
                         .flat_map(|key| data[key].as_array().into_iter().flatten())
                     {
-                        if let Ok(mut channel) = serde_json::from_value::<Channel>(channel.clone())
-                        {
+                        if let Ok(mut channel) = Channel::deserialize(channel) {
                             channel.guild_id = Some(guild.to_owned());
                             state.remember_channel(channel).await;
                         }
@@ -119,7 +118,7 @@ impl Dispatcher {
                 }
             }
             "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "THREAD_CREATE" | "THREAD_UPDATE" => {
-                if let Ok(channel) = serde_json::from_value::<Channel>(data.clone()) {
+                if let Ok(channel) = Channel::deserialize(&data) {
                     if state.allowed_guild(channel.guild_id.as_deref()) {
                         state.remember_channel(channel).await;
                     } else {
@@ -153,8 +152,7 @@ impl Dispatcher {
                         });
                     }
                     for channel in data["threads"].as_array().into_iter().flatten() {
-                        if let Ok(mut channel) = serde_json::from_value::<Channel>(channel.clone())
-                        {
+                        if let Ok(mut channel) = Channel::deserialize(channel) {
                             channel.guild_id = Some(guild.to_owned());
                             state.remember_channel(channel).await;
                         }

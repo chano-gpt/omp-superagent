@@ -9,7 +9,7 @@ publish = false
 aes-gcm = "0.10"
 anyhow = "1"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", default-features = false, features = ["json", "tower-log", "tracing"] }
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 davey = "0.2.0"
@@ -19,16 +19,16 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 nix = { version = "0.30", features = ["signal", "process", "user", "fs"] }
 opus2 = { version = "0.4", features = ["bundled"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
-tokio = { version = "1", features = ["full"] }
-time = { version = "0.3", features = ["parsing", "formatting"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+time = { version = "0.3", features = ["parsing"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 url = "2"
-unicode-width = "0.2"
+unicode-width = { version = "0.2", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 
 # Match Bun's Darwin SQLite VFS: it preserves the WAL sidecars needed by
@@ -43,9 +43,11 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1"
 
 [dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 openmls = "0.8.1"
 openmls_basic_credential = "0.5"
 openmls_rust_crypto = "0.5.1"
+tokio = { version = "1", features = ["fs", "io-std", "rt-multi-thread"] }
 
 [profile.release]
 strip = true

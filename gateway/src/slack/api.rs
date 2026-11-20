@@ -140,7 +140,9 @@ impl Api {
             .local
             .as_ref()
             .map_or(url, |base| format!("{base}{method}"));
-        let mut form = args.as_object().ok_or(ApiError::InvalidReply)?.clone();
+        let Value::Object(mut form) = args else {
+            return Err(ApiError::InvalidReply);
+        };
         // The Slack Web API expects structured Block Kit and files arguments
         // as JSON strings in the same form as scalar Web API arguments.
         for entry in form
